@@ -11,6 +11,8 @@ from PyQt6.QtGui import QFont, QPainter, QColor, QPen
 from abc import ABC, abstractmethod
 import threading
 import math
+import time
+import random
 
 # Install these libraries:
 # pip install PyQt6 pyaccsharedmemory matplotlib
@@ -46,6 +48,13 @@ class ACUDPReader(TelemetryReader):
         self.handshake_sent = False
         self.running = False
         self.listener_thread = None
+        
+        # Simple simulated lap state so the UDP-based
+        # simulator can drive lap timing similar to Monza.
+        self.sim_lap_start_ms = None
+        self.sim_target_lap_ms = None
+        self.sim_lap_count = 0
+        self.sim_last_lap_ms = 0
         
     def connect(self):
         """Connect to AC UDP server"""
@@ -112,24 +121,57 @@ class ACUDPReader(TelemetryReader):
             rpm = struct.unpack('<f', data[offset+16:offset+20])[0]
             gear = struct.unpack('<i', data[offset+20:offset+24])[0]
             
+            # Optional: throttle, brake, steer_angle, abs, tc (if packet is long enough)
+            throttle = brake = steer_angle = abs_val = tc_val = 0.0
+            if len(data) >= 56:
+                throttle = struct.unpack('<f', data[36:40])[0]
+                brake = struct.unpack('<f', data[40:44])[0]
+                steer_angle = struct.unpack('<f', data[44:48])[0]
+                abs_val = struct.unpack('<f', data[48:52])[0]
+                tc_val = struct.unpack('<f', data[52:56])[0]
+            
+            # --- Simulated Monza-style lap timing for UDP source ---
+            # We don't get lap info over this simplified UDP format,
+            # so we synthesize it here to:
+            #   - have laps between 1:21 and 1:39 (Monza-ish)
+            #   - drive the per-lap graph reset & exports
+            now_ms = int(time.time() * 1000)
+            if self.sim_lap_start_ms is None:
+                self.sim_lap_start_ms = now_ms
+                # Random lap length between 81s and 99s
+                self.sim_target_lap_ms = random.randint(81000, 99000)
+            
+            elapsed_ms = now_ms - self.sim_lap_start_ms
+            
+            if elapsed_ms >= self.sim_target_lap_ms:
+                # Lap finished
+                self.sim_last_lap_ms = elapsed_ms
+                self.sim_lap_count += 1
+                self.sim_lap_start_ms = now_ms
+                self.sim_target_lap_ms = random.randint(81000, 99000)
+                elapsed_ms = 0
+            
             return {
                 'speed': speed_kmh,
                 'rpm': rpm,
                 'max_rpm': 8000,
                 'gear': gear,
-                'throttle': 0,
-                'brake': 0,
-                'steer_angle': 0,
-                'abs': 0,
-                'tc': 0,
+                'throttle': throttle,
+                'brake': brake,
+                'steer_angle': steer_angle,
+                'abs': abs_val,
+                'tc': tc_val,
                 'fuel': 0,
                 'max_fuel': 100,
-                'lap_time': 0,
+                # Last completed lap time in seconds
+                'lap_time': self.sim_last_lap_ms / 1000.0 if self.sim_lap_count > 0 else 0,
                 'position': 0,
-                'car_name': 'Unknown',
-                'track_name': 'Unknown',
-                'lap_count': 0,
-                'current_time': 0
+                'car_name': 'Simulated Car',
+                'track_name': 'Monza (Simulated)',
+                # Completed laps so far
+                'lap_count': self.sim_lap_count,
+                # Current lap elapsed time in ms (used for x-axis / lap reset)
+                'current_time': elapsed_ms
             }
         except Exception as e:
             return None
