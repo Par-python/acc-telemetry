@@ -4,7 +4,8 @@ import struct
 from collections import deque
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QLabel, QProgressBar, QComboBox, QPushButton,
-                             QLineEdit, QFormLayout, QGroupBox, QTabWidget)
+                             QLineEdit, QFormLayout, QGroupBox, QTabWidget, QFileDialog,
+                             QMessageBox)
 from PyQt6.QtCore import QTimer, Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont, QPainter, QColor, QPen
 from abc import ABC, abstractmethod
@@ -203,87 +204,112 @@ class ACCReader(TelemetryReader):
 
 
 class TelemetryGraph(FigureCanvas):
-    """Custom matplotlib graph widget"""
+    """Custom matplotlib graph widget for a single value over time.
     
-    def __init__(self, title, ylabel, max_points=500, ylim=(0, 100)):
+    - X-axis always uses full width of the canvas.
+    - Title is not drawn on the axes; it is shown via a Qt label above the graph.
+    """
+    
+    def __init__(self, title, ylabel, max_points=None, ylim=(0, 100)):
         self.fig = Figure(figsize=(8, 2), facecolor='#2b2b2b')
         super().__init__(self.fig)
         
         self.ax = self.fig.add_subplot(111)
         self.ax.set_facecolor('#1e1e1e')
-        self.ax.set_title(title, color='white', fontsize=10)
+        
         self.ax.set_ylabel(ylabel, color='white', fontsize=8)
         self.ax.tick_params(colors='white', labelsize=7)
         self.ax.grid(True, alpha=0.2, color='gray')
         self.ax.set_ylim(ylim)
         
-        self.max_points = max_points
-        self.data = deque(maxlen=max_points)
+        self.max_points = max_points  # None means unlimited (per lap)
+        self.data = []
         self.line, = self.ax.plot([], [], 'cyan', linewidth=1.5)
         
+        # No matplotlib title here; handled by external Qt label
         self.fig.tight_layout()
     
     def update_data(self, value):
-        """Add new data point and redraw"""
+        """Add new data point and redraw."""
+        if self.max_points is not None and len(self.data) >= self.max_points:
+            # Keep only the most recent points if a limit is set
+            self.data.pop(0)
         self.data.append(value)
         
-        self.line.set_data(range(len(self.data)), list(self.data))
-        self.ax.set_xlim(0, self.max_points)
+        x = range(len(self.data))
+        self.line.set_data(x, self.data)
         
-        self.draw()
+        # Always use full width for current data
+        self.ax.set_xlim(0, max(1, len(self.data)))
+        
+        self.draw_idle()
     
     def clear(self):
-        """Clear all data"""
+        """Clear all data."""
         self.data.clear()
         self.line.set_data([], [])
-        self.draw()
+        self.ax.set_xlim(0, 1)
+        self.draw_idle()
 
 
 class MultiLineGraph(FigureCanvas):
-    """Graph widget for multiple lines (throttle/brake or ABS/TC)"""
+    """Graph widget for multiple lines (throttle/brake or ABS/TC).
     
-    def __init__(self, title, ylabel, max_points=500, line1_label='Line 1', line2_label='Line 2',
+    - X-axis always uses full width of the canvas.
+    - Title is not drawn on the axes; it is shown via a Qt label above the graph.
+    """
+    
+    def __init__(self, title, ylabel, max_points=None, line1_label='Line 1', line2_label='Line 2',
                  line1_color='lime', line2_color='red'):
         self.fig = Figure(figsize=(8, 2), facecolor='#2b2b2b')
         super().__init__(self.fig)
         
         self.ax = self.fig.add_subplot(111)
         self.ax.set_facecolor('#1e1e1e')
-        self.ax.set_title(title, color='white', fontsize=10)
+        
         self.ax.set_ylabel(ylabel, color='white', fontsize=8)
         self.ax.tick_params(colors='white', labelsize=7)
         self.ax.grid(True, alpha=0.2, color='gray')
         self.ax.set_ylim(0, 100)
         
-        self.max_points = max_points
-        self.line1_data = deque(maxlen=max_points)
-        self.line2_data = deque(maxlen=max_points)
+        self.max_points = max_points  # None means unlimited (per lap)
+        self.line1_data = []
+        self.line2_data = []
         
         self.line1, = self.ax.plot([], [], line1_color, linewidth=1.5, label=line1_label)
         self.line2, = self.ax.plot([], [], line2_color, linewidth=1.5, label=line2_label)
         self.ax.legend(loc='upper right', fontsize=7, facecolor='#2b2b2b', edgecolor='white')
         
+        # No matplotlib title here; handled by external Qt label
         self.fig.tight_layout()
     
     def update_data(self, value1, value2):
-        """Add new data points"""
+        """Add new data points."""
+        if self.max_points is not None and len(self.line1_data) >= self.max_points:
+            # Keep only the most recent points if a limit is set
+            self.line1_data.pop(0)
+            self.line2_data.pop(0)
+        
         self.line1_data.append(value1)
         self.line2_data.append(value2)
         
         x = range(len(self.line1_data))
-        self.line1.set_data(x, list(self.line1_data))
-        self.line2.set_data(x, list(self.line2_data))
-        self.ax.set_xlim(0, self.max_points)
+        self.line1.set_data(x, self.line1_data)
+        self.line2.set_data(x, self.line2_data)
         
-        self.draw()
+        # Always use full width for current data
+        self.ax.set_xlim(0, max(1, len(self.line1_data)))
+        
+        self.draw_idle()
     
     def clear(self):
-        """Clear all data"""
+        """Clear all data."""
         self.line1_data.clear()
         self.line2_data.clear()
         self.line1.set_data([], [])
         self.line2.set_data([], [])
-        self.draw()
+        self.ax.set_xlim(0, 1)
+        self.draw_idle()
 
 
 class SteeringWidget(QWidget):
@@ -355,6 +381,11 @@ class TelemetryApp(QMainWindow):
         # Track lap changes for graph reset
         self.last_lap_time = 0
         self.current_lap_count = 0
+        
+        # Store time-series data per lap and for the whole session
+        self.session_laps = []  # List[{'lap_number': int, 'data': dict}]
+        self.current_lap_start_time = 0
+        self._reset_current_lap_data()
         
         # Setup UI
         self.init_ui()
@@ -521,37 +552,103 @@ class TelemetryApp(QMainWindow):
         graphs_tab = QWidget()
         graphs_layout = QVBoxLayout(graphs_tab)
         
+        # Export controls
+        graphs_controls_layout = QHBoxLayout()
+        self.export_last_lap_button = QPushButton("Save Last Lap Graphs")
+        self.export_last_lap_button.clicked.connect(self.export_last_lap_graphs)
+        graphs_controls_layout.addWidget(self.export_last_lap_button)
+        
+        self.export_session_button = QPushButton("Save Full Session Graphs")
+        self.export_session_button.clicked.connect(self.export_session_graphs)
+        graphs_controls_layout.addWidget(self.export_session_button)
+        graphs_controls_layout.addStretch()
+        
+        graphs_layout.addLayout(graphs_controls_layout)
+        
         # Speed graph
+        self.speed_graph_title = QLabel()
+        self.speed_graph_title.setStyleSheet("color: white; font-weight: bold;")
+        graphs_layout.addWidget(self.speed_graph_title)
         self.speed_graph = TelemetryGraph("Speed", "km/h", ylim=(0, 300))
         graphs_layout.addWidget(self.speed_graph)
         
         # Throttle/Brake graph
+        self.pedals_graph_title = QLabel()
+        self.pedals_graph_title.setStyleSheet("color: white; font-weight: bold;")
+        graphs_layout.addWidget(self.pedals_graph_title)
         self.pedals_graph = MultiLineGraph("Throttle & Brake", "%", 
                                           line1_label='Throttle', line2_label='Brake',
                                           line1_color='lime', line2_color='red')
         graphs_layout.addWidget(self.pedals_graph)
         
         # Steering graph
+        self.steering_graph_title = QLabel()
+        self.steering_graph_title.setStyleSheet("color: white; font-weight: bold;")
+        graphs_layout.addWidget(self.steering_graph_title)
         self.steering_graph = TelemetryGraph("Steering Angle", "degrees", ylim=(-540, 540))
         graphs_layout.addWidget(self.steering_graph)
         
         # RPM graph
+        self.rpm_graph_title = QLabel()
+        self.rpm_graph_title.setStyleSheet("color: white; font-weight: bold;")
+        graphs_layout.addWidget(self.rpm_graph_title)
         self.rpm_graph = TelemetryGraph("RPM", "RPM", ylim=(0, 10000))
         graphs_layout.addWidget(self.rpm_graph)
         
         # Gear graph
+        self.gear_graph_title = QLabel()
+        self.gear_graph_title.setStyleSheet("color: white; font-weight: bold;")
+        graphs_layout.addWidget(self.gear_graph_title)
         self.gear_graph = TelemetryGraph("Gear", "Gear", ylim=(-1, 8))
         graphs_layout.addWidget(self.gear_graph)
         
         # ABS/TC graph
+        self.aids_graph_title = QLabel()
+        self.aids_graph_title.setStyleSheet("color: white; font-weight: bold;")
+        graphs_layout.addWidget(self.aids_graph_title)
         self.aids_graph = MultiLineGraph("ABS & TC Activity", "Intensity",
                                         line1_label='ABS', line2_label='TC',
                                         line1_color='orange', line2_color='yellow')
         graphs_layout.addWidget(self.aids_graph)
         
+        # Initial titles (will be updated as laps change)
+        self._set_graph_title_suffix("Lap 1")
+        
         tabs.addTab(graphs_tab, "Telemetry Graphs")
         
         main_layout.addWidget(tabs)
+    
+    def _reset_current_lap_data(self):
+        """Initialize/clear containers for the current lap's raw data."""
+        self.current_lap_data = {
+            'time_ms': [],
+            'speed': [],
+            'throttle': [],
+            'brake': [],
+            'steer_deg': [],
+            'rpm': [],
+            'gear': [],
+            'abs': [],
+            'tc': [],
+        }
+    
+    def _store_completed_lap(self):
+        """Store the just-finished lap into the session history."""
+        # Only store if we actually have data points
+        if self.current_lap_data.get('speed'):
+            self.session_laps.append({
+                'lap_number': self.current_lap_count,
+                'data': {k: list(v) for k, v in self.current_lap_data.items()},
+            })
+    
+    def _set_graph_title_suffix(self, suffix: str):
+        """Apply a dynamic suffix (e.g. 'Lap 3') to all graph labels above the canvases."""
+        self.speed_graph_title.setText(f"Speed - {suffix}")
+        self.pedals_graph_title.setText(f"Throttle & Brake - {suffix}")
+        self.steering_graph_title.setText(f"Steering Angle - {suffix}")
+        self.rpm_graph_title.setText(f"RPM - {suffix}")
+        self.gear_graph_title.setText(f"Gear - {suffix}")
+        self.aids_graph_title.setText(f"ABS & TC Activity - {suffix}")
     
     def on_game_changed(self, game):
         if game == 'Auto-Detect':
@@ -604,12 +701,24 @@ class TelemetryApp(QMainWindow):
         # 1. New lap detected (lap count increased)
         # 2. Session restart (lap count reset to 0 from higher value)
         # 3. Current time is very low (< 5 seconds) - indicates restart
-        if (current_lap > self.current_lap_count or 
-            (current_lap == 0 and self.current_lap_count > 0) or
-            (current_time < 5000 and self.last_lap_time > 5000)):
+        lap_changed = (
+            current_lap > self.current_lap_count
+            or (current_lap == 0 and self.current_lap_count > 0)
+            or (current_time < 5000 and self.last_lap_time > 5000)
+        )
+        
+        if lap_changed:
+            # Persist the data for the lap that just finished
+            self._store_completed_lap()
             
+            # Reset per-lap visuals and containers so each graph shows only one lap
             print(f"Resetting graphs - Lap: {current_lap}, Time: {current_time}")
             self.reset_graphs()
+            self._reset_current_lap_data()
+            
+            # Update dynamic titles to reflect the new lap number (1-based for display)
+            display_lap = current_lap if current_lap > 0 else 1
+            self._set_graph_title_suffix(f"Lap {display_lap}")
         
         self.current_lap_count = current_lap
         self.last_lap_time = current_time
@@ -673,6 +782,17 @@ class TelemetryApp(QMainWindow):
         self.rpm_graph.update_data(data['rpm'])
         self.gear_graph.update_data(gear if isinstance(gear, int) else 0)
         self.aids_graph.update_data(data['abs'], data['tc'])
+        
+        # Store raw data for current lap/session exports
+        self.current_lap_data['time_ms'].append(current_time)
+        self.current_lap_data['speed'].append(data['speed'])
+        self.current_lap_data['throttle'].append(data['throttle'])
+        self.current_lap_data['brake'].append(data['brake'])
+        self.current_lap_data['steer_deg'].append(math.degrees(data['steer_angle']))
+        self.current_lap_data['rpm'].append(data['rpm'])
+        self.current_lap_data['gear'].append(gear if isinstance(gear, int) else 0)
+        self.current_lap_data['abs'].append(data['abs'])
+        self.current_lap_data['tc'].append(data['tc'])
     
     def reset_graphs(self):
         """Reset all telemetry graphs"""
@@ -682,6 +802,114 @@ class TelemetryApp(QMainWindow):
         self.rpm_graph.clear()
         self.gear_graph.clear()
         self.aids_graph.clear()
+    
+    def _get_last_lap_data(self):
+        """Return data for the most recently completed lap, or current lap if none completed yet."""
+        if self.session_laps:
+            return self.session_laps[-1]['data']
+        return self.current_lap_data
+    
+    def _get_session_data(self):
+        """Combine all laps (completed + current) into a single data dictionary."""
+        combined = {k: [] for k in self.current_lap_data}
+        
+        for lap in self.session_laps:
+            lap_data = lap['data']
+            for key in combined:
+                combined[key].extend(lap_data.get(key, []))
+        
+        for key in combined:
+            combined[key].extend(self.current_lap_data.get(key, []))
+        
+        return combined
+    
+    def _export_graphs(self, data_dict, dialog_title: str, default_filename: str):
+        """Create and save a multi-panel figure for the provided data."""
+        # Need at least some speed data to bother exporting
+        if not data_dict.get('speed'):
+            QMessageBox.information(self, "Export Graphs", "No telemetry data available to export yet.")
+            return
+        
+        # Ask user where to save
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            dialog_title,
+            default_filename,
+            "PNG Image (*.png);;All Files (*)",
+        )
+        if not file_path:
+            return
+        
+        time_ms = data_dict.get('time_ms', [])
+        if time_ms:
+            start = time_ms[0]
+            x_values = [(t - start) / 1000.0 for t in time_ms]
+            x_label = "Time (s)"
+        else:
+            x_values = list(range(len(data_dict['speed'])))
+            x_label = "Samples"
+        
+        # Build a new figure with the same dark theme
+        export_fig = Figure(figsize=(10, 8), facecolor='#2b2b2b')
+        axs = export_fig.subplots(3, 2, sharex=True)
+        axs = axs.flatten()
+        
+        def style_ax(ax, title):
+            ax.set_facecolor('#1e1e1e')
+            ax.set_title(title, color='white', fontsize=10)
+            ax.tick_params(colors='white', labelsize=7)
+            ax.grid(True, alpha=0.2, color='gray')
+        
+        # Speed
+        style_ax(axs[0], "Speed")
+        axs[0].plot(x_values, data_dict['speed'], color='cyan', linewidth=1.0)
+        axs[0].set_ylabel("km/h", color='white', fontsize=8)
+        
+        # Throttle & Brake
+        style_ax(axs[1], "Throttle & Brake")
+        axs[1].plot(x_values, data_dict['throttle'], color='lime', linewidth=1.0, label='Throttle')
+        axs[1].plot(x_values, data_dict['brake'], color='red', linewidth=1.0, label='Brake')
+        axs[1].set_ylabel("%", color='white', fontsize=8)
+        axs[1].legend(loc='upper right', fontsize=7, facecolor='#2b2b2b', edgecolor='white')
+        
+        # Steering
+        style_ax(axs[2], "Steering Angle")
+        axs[2].plot(x_values, data_dict['steer_deg'], color='magenta', linewidth=1.0)
+        axs[2].set_ylabel("degrees", color='white', fontsize=8)
+        
+        # RPM
+        style_ax(axs[3], "RPM")
+        axs[3].plot(x_values, data_dict['rpm'], color='yellow', linewidth=1.0)
+        axs[3].set_ylabel("RPM", color='white', fontsize=8)
+        
+        # Gear
+        style_ax(axs[4], "Gear")
+        axs[4].step(x_values, data_dict['gear'], color='white', linewidth=1.0, where='post')
+        axs[4].set_ylabel("Gear", color='white', fontsize=8)
+        
+        # ABS & TC
+        style_ax(axs[5], "ABS & TC Activity")
+        axs[5].plot(x_values, data_dict['abs'], color='orange', linewidth=1.0, label='ABS')
+        axs[5].plot(x_values, data_dict['tc'], color='yellow', linewidth=1.0, label='TC')
+        axs[5].set_ylabel("Intensity", color='white', fontsize=8)
+        axs[5].legend(loc='upper right', fontsize=7, facecolor='#2b2b2b', edgecolor='white')
+        
+        for ax in axs[4:]:
+            ax.set_xlabel(x_label, color='white', fontsize=8)
+        
+        export_fig.tight_layout()
+        export_fig.savefig(file_path, dpi=150)
+        QMessageBox.information(self, "Export Graphs", f"Graphs saved to:\n{file_path}")
+    
+    def export_last_lap_graphs(self):
+        """Export graphs for the latest lap."""
+        lap_data = self._get_last_lap_data()
+        self._export_graphs(lap_data, "Save Last Lap Graphs", "last_lap.png")
+    
+    def export_session_graphs(self):
+        """Export graphs for the full session (all laps)."""
+        session_data = self._get_session_data()
+        self._export_graphs(session_data, "Save Full Session Graphs", "session.png")
     
     def reset_display(self):
         """Reset display when disconnected"""
