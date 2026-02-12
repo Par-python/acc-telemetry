@@ -1,13 +1,14 @@
 import sys
+import os
 import socket
 import struct
 from collections import deque
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QLabel, QProgressBar, QComboBox, QPushButton,
                              QLineEdit, QFormLayout, QGroupBox, QTabWidget, QFileDialog,
-                             QMessageBox)
-from PyQt6.QtCore import QTimer, Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QFont, QPainter, QColor, QPen
+                             QMessageBox, QSplitter, QScrollArea, QFrame, QGridLayout)
+from PyQt6.QtCore import QTimer, Qt, QThread, pyqtSignal, QRectF
+from PyQt6.QtGui import QFont, QPainter, QColor, QPen, QBrush, QPixmap
 from abc import ABC, abstractmethod
 import threading
 import math
@@ -408,11 +409,277 @@ class SteeringWidget(QWidget):
                         f"{angle_deg:.1f}°")
 
 
+# --- Monza approximate centerline (pixel coords for 900x675 image) for car position ---
+def _monza_centerline_points():
+    """Rough centerline path for Monza_900x.png (900x675). progress 0..1 maps along the track."""
+    points = []
+    n = 120
+    for i in range(n + 1):
+        t = i / n
+        ang = t * 2 * math.pi
+        x = 450 + 380 * math.cos(ang)
+        y = 337 + 280 * math.sin(ang)  # center 337 for 675 height
+        points.append((x, y))
+    return points
+
+
+MONZA_CENTERLINE = _monza_centerline_points()
+MONZA_LENGTH_M = 5793  # Actual Monza GP length
+
+
+class TrackMapWidget(QWidget):
+    """Displays track map with live car position dot."""
+
+    def __init__(self, track_image_path=None):
+        super().__init__()
+        self.setMinimumSize(400, 300)
+        self.car_progress = 0.0  # 0..1 along lap
+        self._pixmap = None
+        self._track_path = track_image_path
+        if track_image_path and os.path.isfile(track_image_path):
+            self._pixmap = QPixmap(track_image_path)
+
+    def set_track(self, path):
+        if path and os.path.isfile(path):
+            self._track_path = path
+            self._pixmap = QPixmap(path)
+            self.update()
+
+    def set_car_progress(self, progress):
+        """progress: 0..1 along lap (from distance or time)"""
+        self.car_progress = max(0, min(1, progress))
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = self.rect()
+        if self._pixmap and not self._pixmap.isNull():
+            scaled = self._pixmap.scaled(rect.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            img_w, img_h = scaled.width(), scaled.height()
+            ox = (rect.width() - img_w) // 2
+            oy = (rect.height() - img_h) // 2
+            painter.drawPixmap(ox, oy, scaled)
+            # Map track coords (900x675) to drawn pixmap
+            scale_x = img_w / 900.0
+            scale_y = img_h / 675.0
+            scale = min(scale_x, scale_y)
+            idx = int(self.car_progress * (len(MONZA_CENTERLINE) - 1))
+            cx, cy = MONZA_CENTERLINE[idx]
+            px = ox + cx * scale_x
+            py = oy + cy * scale_y
+        else:
+            painter.fillRect(rect, QColor(30, 30, 30))
+            px = rect.center().x() + 100 * math.cos(self.car_progress * 2 * math.pi)
+            py = rect.center().y() + 80 * math.sin(self.car_progress * 2 * math.pi)
+        painter.setPen(QPen(QColor(255, 50, 50), 2))
+        painter.setBrush(QBrush(QColor(255, 50, 50)))
+        r = 8
+        painter.drawEllipse(int(px - r), int(py - r), r * 2, r * 2)
+
+
+class SectorTimesPanel(QWidget):
+    """Left panel: lap times and sector gaps."""
+
+    def __init__(self):
+        super().__init__()
+        self.setMaximumWidth(220)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        self.lap1_label = QLabel("01:41.475")
+        self.lap1_label.setStyleSheet("color: #e74c3c; font-weight: bold; font-size: 14px;")
+        self.lap2_label = QLabel("01:41.510 (+0.035s)")
+        self.lap2_label.setStyleSheet("color: #3498db; font-weight: bold; font-size: 14px;")
+        lap_box = QFrame()
+        lap_box.setStyleSheet("QFrame { background-color: #2b2b2b; border-radius: 4px; padding: 8px; }")
+        lap_layout = QVBoxLayout(lap_box)
+        lap_layout.addWidget(QLabel("Laps:", styleSheet="color: #888; font-size: 11px;"))
+        lap_layout.addWidget(self.lap1_label)
+        lap_layout.addWidget(self.lap2_label)
+        layout.addWidget(lap_box)
+        gaps_header = QLabel("Gaps:")
+        gaps_header.setStyleSheet("color: #888; font-size: 11px;")
+        layout.addWidget(gaps_header)
+        self.gap_labels = {}
+        self.sector_time_labels = {}
+        grid = QGridLayout()
+        grid.addWidget(QLabel("Sector", styleSheet="color: #888;"), 0, 0)
+        grid.addWidget(QLabel("Lap 1", styleSheet="color: #888;"), 0, 1)
+        grid.addWidget(QLabel("Δ Lap 2", styleSheet="color: #888;"), 0, 2)
+        for row, s in enumerate(["S1", "S2", "S3", "S4", "S5"], 1):
+            grid.addWidget(QLabel(s), row, 0)
+            st_lbl = QLabel("20.706")
+            self.sector_time_labels[s] = st_lbl
+            grid.addWidget(st_lbl, row, 1)
+            gap_lbl = QLabel("--")
+            self.gap_labels[s] = gap_lbl
+            grid.addWidget(gap_lbl, row, 2)
+        gaps_frame = QFrame()
+        gaps_frame.setStyleSheet("QFrame { background-color: #2b2b2b; border-radius: 4px; padding: 8px; }")
+        gaps_frame.setLayout(grid)
+        layout.addWidget(gaps_frame)
+        layout.addStretch()
+
+    def update_laps(self, lap1_time_s, lap2_time_s, gap_s):
+        """Update displayed lap times and gap."""
+        def fmt(t):
+            m = int(t // 60)
+            s = t % 60
+            return f"{m:02d}:{s:06.3f}"
+        self.lap1_label.setText(fmt(lap1_time_s))
+        sign = "+" if gap_s >= 0 else ""
+        self.lap2_label.setText(f"{fmt(lap2_time_s)} ({sign}{gap_s:.3f}s)")
+        self._update_gaps(lap1_time_s, lap2_time_s)
+
+    def _update_gaps(self, t1, t2):
+        """Simulate sector gaps (5 equal sectors)."""
+        base = t1 / 5
+        times = [base * 1.1, base * 0.9, base * 1.0, base * 1.05, base * 0.95]
+        d1, d2, d3, d4, d5 = (t2 - t1) * 0.2, (t2 - t1) * 0.4, (t2 - t1) * -0.3, (t2 - t1) * 0.2, (t2 - t1) * -0.2
+        for s, sec_t, delta in [("S1", times[0], d1), ("S2", times[1], d2), ("S3", times[2], d3), ("S4", times[3], d4), ("S5", times[4], d5)]:
+            self.sector_time_labels[s].setText(f"{sec_t:.3f}")
+            lbl = self.gap_labels[s]
+            sign = "+" if delta >= 0 else ""
+            lbl.setText(f"{sign}{delta:.3f}s")
+            lbl.setStyleSheet("background-color: #e74c3c22; color: #e74c3c;" if delta > 0 else "background-color: #27ae6022; color: #27ae60;")
+
+
+class TimeDeltaGraph(FigureCanvas):
+    """Bottom panel: time delta vs distance (gap to reference lap)."""
+
+    def __init__(self):
+        self.fig = Figure(figsize=(10, 1.8), facecolor='#2b2b2b')
+        super().__init__(self.fig)
+        self.ax = self.fig.add_subplot(111)
+        self.ax.set_facecolor('#1e1e1e')
+        self.ax.set_ylabel("Time delta", color='white', fontsize=9)
+        self.ax.tick_params(colors='white', labelsize=7)
+        self.ax.axhline(0, color='#e74c3c', linewidth=1)
+        self.ax.grid(True, alpha=0.2, color='gray')
+        self.distances = []
+        self.deltas = []
+        self.current_dist = 0
+        self.line, = self.ax.plot([], [], '#3498db', linewidth=1.5)
+        self.vline = self.ax.axvline(0, color='white', linewidth=1, alpha=0.7)
+        self.fig.tight_layout()
+
+    def update_data(self, distances, deltas, current_distance_m):
+        self.distances = list(distances) if distances else []
+        self.deltas = list(deltas) if deltas else []
+        self.current_dist = current_distance_m
+        if self.distances and self.deltas:
+            self.line.set_data(self.distances, self.deltas)
+            self.ax.set_xlim(0, max(MONZA_LENGTH_M, max(self.distances)))
+            mn = min(-0.2, min(self.deltas) - 0.02)
+            mx = max(0.2, max(self.deltas) + 0.02)
+            self.ax.set_ylim(mn, mx)
+        self.vline.set_xdata([current_distance_m])
+        self.draw_idle()
+
+    def clear(self):
+        self.distances = []
+        self.deltas = []
+        self.line.set_data([], [])
+        self.vline.set_xdata([0])
+        self.ax.set_xlim(0, MONZA_LENGTH_M)
+        self.ax.set_ylim(-0.2, 0.2)
+        self.draw_idle()
+
+
+class AnalysisTelemetryGraph(FigureCanvas):
+    """Telemetry graph with distance (m) on X-axis for lap analysis."""
+
+    def __init__(self, ylabel, ylim=(0, 100)):
+        self.fig = Figure(figsize=(4, 1.2), facecolor='#2b2b2b')
+        super().__init__(self.fig)
+        self.ax = self.fig.add_subplot(111)
+        self.ax.set_facecolor('#1e1e1e')
+        self.ax.set_ylabel(ylabel, color='white', fontsize=8)
+        self.ax.tick_params(colors='white', labelsize=6)
+        self.ax.set_ylim(ylim)
+        self.ax.grid(True, alpha=0.2, color='gray')
+        self.distances = []
+        self.values = []
+        self.line, = self.ax.plot([], [], 'cyan', linewidth=1.2)
+        self.vline = self.ax.axvline(0, color='white', linewidth=0.8, alpha=0.6)
+        self.fig.tight_layout()
+
+    def update_data(self, distance_m, value):
+        self.distances.append(distance_m)
+        self.values.append(value)
+        self.line.set_data(self.distances, self.values)
+        self.ax.set_xlim(0, max(MONZA_LENGTH_M, distance_m))
+        self.vline.set_xdata([distance_m])
+        self.draw_idle()
+
+    def clear(self):
+        self.distances.clear()
+        self.values.clear()
+        self.line.set_data([], [])
+        self.vline.set_xdata([0])
+        self.ax.set_xlim(0, MONZA_LENGTH_M)
+        self.draw_idle()
+
+
+class AnalysisMultiLineGraph(FigureCanvas):
+    """Multi-line graph with distance on X-axis."""
+
+    def __init__(self, ylabel, line1_label, line2_label, line1_color='lime', line2_color='red'):
+        self.fig = Figure(figsize=(4, 1.2), facecolor='#2b2b2b')
+        super().__init__(self.fig)
+        self.ax = self.fig.add_subplot(111)
+        self.ax.set_facecolor('#1e1e1e')
+        self.ax.set_ylabel(ylabel, color='white', fontsize=8)
+        self.ax.tick_params(colors='white', labelsize=6)
+        self.ax.set_ylim(0, 100)
+        self.ax.grid(True, alpha=0.2, color='gray')
+        self.distances = []
+        self.v1, self.v2 = [], []
+        self.line1, = self.ax.plot([], [], line1_color, linewidth=1.2, label=line1_label)
+        self.line2, = self.ax.plot([], [], line2_color, linewidth=1.2, label=line2_label)
+        self.ax.legend(loc='upper right', fontsize=6)
+        self.vline = self.ax.axvline(0, color='white', linewidth=0.8, alpha=0.6)
+        self.fig.tight_layout()
+
+    def update_data(self, distance_m, val1, val2):
+        self.distances.append(distance_m)
+        self.v1.append(val1)
+        self.v2.append(val2)
+        self.line1.set_data(self.distances, self.v1)
+        self.line2.set_data(self.distances, self.v2)
+        self.ax.set_xlim(0, max(MONZA_LENGTH_M, distance_m))
+        self.vline.set_xdata([distance_m])
+        self.draw_idle()
+
+    def clear(self):
+        self.distances.clear()
+        self.v1.clear()
+        self.v2.clear()
+        self.line1.set_data([], [])
+        self.line2.set_data([], [])
+        self.vline.set_xdata([0])
+        self.ax.set_xlim(0, MONZA_LENGTH_M)
+        self.draw_idle()
+
+
 class TelemetryApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("AC/ACC Telemetry Dashboard with Graphs")
-        self.setGeometry(100, 100, 1400, 900)
+        self.setWindowTitle("AC/ACC Telemetry Dashboard")
+        self.setGeometry(100, 100, 1600, 950)
+        self.setStyleSheet("""
+            QMainWindow, QWidget { background-color: #1a1a1a; }
+            QGroupBox { color: #ccc; border: 1px solid #444; border-radius: 4px; margin-top: 8px; }
+            QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }
+            QTabWidget::pane { border: 1px solid #333; background: #1e1e1e; }
+            QTabBar::tab { background: #2b2b2b; color: #ccc; padding: 8px 16px; }
+            QTabBar::tab:selected { background: #333; color: white; }
+            QLabel { color: #ddd; }
+            QComboBox, QLineEdit { background: #2b2b2b; color: white; border: 1px solid #555; padding: 4px; }
+            QPushButton { background: #333; color: white; border: 1px solid #555; padding: 6px 12px; }
+            QPushButton:hover { background: #444; }
+            QScrollArea { border: none; background: transparent; }
+        """)
         
         # Initialize readers
         self.ac_reader = None
@@ -658,6 +925,60 @@ class TelemetryApp(QMainWindow):
         
         tabs.addTab(graphs_tab, "Telemetry Graphs")
         
+        # --- Lap Analysis tab: sector times (left), track map (center), telemetry (right), time delta (bottom) ---
+        analysis_tab = QWidget()
+        analysis_main = QVBoxLayout(analysis_tab)
+        
+        # Resolve track image path
+        _script_dir = os.path.dirname(os.path.abspath(__file__))
+        _monza_path = os.path.join(_script_dir, "tracks", "Monza_900x.png")
+        
+        # Left | Center | Right split
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        
+        self.sector_panel = SectorTimesPanel()
+        splitter.addWidget(self.sector_panel)
+        
+        self.track_map = TrackMapWidget(_monza_path)
+        self.track_map.setMinimumWidth(450)
+        splitter.addWidget(self.track_map)
+        
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setSpacing(4)
+        right_scroll = QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setWidget(right_panel)
+        right_scroll.setMinimumWidth(280)
+        right_scroll.setMaximumWidth(320)
+        
+        self.ana_speed = AnalysisTelemetryGraph("Speed (km/h)", ylim=(0, 320))
+        self.ana_throttle = AnalysisTelemetryGraph("Throttle (%)", ylim=(0, 100))
+        self.ana_brake = AnalysisTelemetryGraph("Brake (%)", ylim=(0, 100))
+        self.ana_gear = AnalysisTelemetryGraph("Gear", ylim=(-1, 8))
+        self.ana_rpm = AnalysisTelemetryGraph("RPM", ylim=(0, 10000))
+        self.ana_steer = AnalysisTelemetryGraph("Steer (°)", ylim=(-540, 540))
+        
+        for g in [self.ana_speed, self.ana_throttle, self.ana_brake, self.ana_gear, self.ana_rpm, self.ana_steer]:
+            right_layout.addWidget(g)
+        
+        splitter.addWidget(right_scroll)
+        splitter.setSizes([220, 500, 300])
+        
+        analysis_main.addWidget(splitter)
+        
+        # Bottom: time delta graph + sector markers
+        analysis_main.addWidget(QLabel("Time delta", styleSheet="color: #888; font-size: 11px;"))
+        self.time_delta_graph = TimeDeltaGraph()
+        self.time_delta_graph.setMinimumHeight(120)
+        analysis_main.addWidget(self.time_delta_graph)
+        sector_bar = QHBoxLayout()
+        for s in ["S1", "S2", "S3", "S4", "S5"]:
+            sector_bar.addWidget(QLabel(s, styleSheet="background-color: #333; padding: 4px 12px; color: #888; font-size: 10px;"))
+        analysis_main.addLayout(sector_bar)
+        
+        tabs.addTab(analysis_tab, "Lap Analysis")
+        
         main_layout.addWidget(tabs)
     
     def _reset_current_lap_data(self):
@@ -756,6 +1077,7 @@ class TelemetryApp(QMainWindow):
             # Reset per-lap visuals and containers so each graph shows only one lap
             print(f"Resetting graphs - Lap: {current_lap}, Time: {current_time}")
             self.reset_graphs()
+            self._reset_analysis_graphs()
             self._reset_current_lap_data()
             
             # Update dynamic titles to reflect the new lap number (1-based for display)
@@ -825,6 +1147,25 @@ class TelemetryApp(QMainWindow):
         self.gear_graph.update_data(gear if isinstance(gear, int) else 0)
         self.aids_graph.update_data(data['abs'], data['tc'])
         
+        # Lap Analysis tab: distance from lap progress, track map, sector times, analysis graphs, time delta
+        lap_dur_ms = 90000  # ~90s typical Monza lap
+        lap_progress = min(1.0, current_time / lap_dur_ms) if lap_dur_ms > 0 else 0
+        distance_m = lap_progress * MONZA_LENGTH_M
+        self.track_map.set_car_progress(lap_progress)
+        ref_lap_s = 101.475  # Simulated reference lap (01:41.475)
+        gap_s = 0.035 + 0.02 * math.sin(time.time() * 0.5)  # Simulated gap
+        self.sector_panel.update_laps(ref_lap_s, ref_lap_s + gap_s, gap_s)
+        self.ana_speed.update_data(distance_m, data['speed'])
+        self.ana_throttle.update_data(distance_m, data['throttle'])
+        self.ana_brake.update_data(distance_m, data['brake'])
+        self.ana_gear.update_data(distance_m, gear if isinstance(gear, int) else 0)
+        self.ana_rpm.update_data(distance_m, data['rpm'])
+        self.ana_steer.update_data(distance_m, math.degrees(data['steer_angle']))
+        n = len(self.current_lap_data.get('time_ms', []))
+        dists = [(self.current_lap_data['time_ms'][i] / lap_dur_ms) * MONZA_LENGTH_M for i in range(n)] if n else []
+        deltas = [0.1 * math.sin(d / 500) for d in dists] if dists else []
+        self.time_delta_graph.update_data(dists, deltas, distance_m)
+        
         # Store raw data for current lap/session exports
         self.current_lap_data['time_ms'].append(current_time)
         self.current_lap_data['speed'].append(data['speed'])
@@ -844,6 +1185,16 @@ class TelemetryApp(QMainWindow):
         self.rpm_graph.clear()
         self.gear_graph.clear()
         self.aids_graph.clear()
+    
+    def _reset_analysis_graphs(self):
+        """Reset Lap Analysis tab graphs and time delta."""
+        self.ana_speed.clear()
+        self.ana_throttle.clear()
+        self.ana_brake.clear()
+        self.ana_gear.clear()
+        self.ana_rpm.clear()
+        self.ana_steer.clear()
+        self.time_delta_graph.clear()
     
     def _get_last_lap_data(self):
         """Return data for the most recently completed lap, or current lap if none completed yet."""
@@ -955,6 +1306,8 @@ class TelemetryApp(QMainWindow):
     
     def reset_display(self):
         """Reset display when disconnected"""
+        self._reset_analysis_graphs()
+        self.track_map.set_car_progress(0)
         self.speed_label.setText("0")
         self.gear_label.setText("N")
         self.rpm_bar.setValue(0)
