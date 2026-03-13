@@ -343,6 +343,8 @@ class ACUDPReader(TelemetryReader):
 
 
 class ACCReader(TelemetryReader):
+    """Assetto Corsa Competizione via pyaccsharedmemory (Windows shared memory)."""
+
     def __init__(self):
         try:
             from pyaccsharedmemory import accSharedMemory
@@ -350,6 +352,7 @@ class ACCReader(TelemetryReader):
             self.available = True
         except Exception as e:
             print(f"ACC Reader initialization failed: {e}")
+            print("Install with: pip install pyaccsharedmemory")
             self.available = False
 
     def read(self):
@@ -392,71 +395,267 @@ class ACCReader(TelemetryReader):
             return False
 
 
+class IRacingReader(TelemetryReader):
+    """iRacing telemetry via irsdk shared memory (Windows only).
+    Install: pip install irsdk
+    """
+
+    def __init__(self):
+        self.ir = None
+        self.available = False
+        try:
+            import irsdk  # type: ignore[import]  – Windows-only, optional dep
+            self.ir = irsdk.IRSDK()
+            self.ir.startup()
+            self.available = True
+        except Exception as e:
+            print(f"iRacing SDK init failed (Windows + iRacing required): {e}")
+
+    def read(self):
+        if not self.available or self.ir is None:
+            return None
+        try:
+            if not (self.ir.is_initialized and self.ir.is_connected):
+                return None
+            self.ir.freeze_var_buffer_latest()
+
+            speed_ms = self.ir['Speed'] or 0.0
+            rpm      = self.ir['RPM']   or 0.0
+            gear_raw = self.ir['Gear']  or 0       # -1=R, 0=N, 1+=drive
+            throttle = (self.ir['Throttle'] or 0.0) * 100.0
+            brake    = (self.ir['Brake']    or 0.0) * 100.0
+            steer    = self.ir['SteeringWheelAngle'] or 0.0
+            fuel     = self.ir['FuelLevel']    or 0.0
+            fuel_pct = self.ir['FuelLevelPct'] or 0.0
+            lap      = self.ir['Lap']              or 0
+            cur_s    = self.ir['LapCurrentLapTime'] or 0.0
+            last_lap = self.ir['LapLastLapTime']    or 0.0
+            lap_pct  = self.ir['LapDistPct']        or 0.0
+
+            try:
+                position = int(self.ir['PlayerCarPosition'] or 0)
+            except Exception:
+                position = 0
+
+            max_rpm = 10000.0
+            try:
+                max_rpm = float(self.ir['DriverInfo']['DriverCarRedLine'] or 10000)
+            except Exception:
+                pass
+
+            max_fuel = (fuel / fuel_pct) if fuel_pct > 0.001 else 100.0
+
+            car_name = 'iRacing Car'
+            try:
+                idx = self.ir['PlayerCarIdx'] or 0
+                car_name = self.ir['DriverInfo']['Drivers'][idx]['CarScreenName']
+            except Exception:
+                pass
+
+            track_name = 'iRacing Track'
+            try:
+                track_name = self.ir['WeekendInfo']['TrackName']
+            except Exception:
+                pass
+
+            # Normalise to app convention: 0=R, 1=N, 2+=1st,2nd,...
+            if gear_raw < 0:
+                gear = 0
+            elif gear_raw == 0:
+                gear = 1
+            else:
+                gear = gear_raw + 1
+
+            return {
+                'speed':        speed_ms * 3.6,
+                'rpm':          rpm,
+                'max_rpm':      max_rpm,
+                'gear':         gear,
+                'throttle':     throttle,
+                'brake':        brake,
+                'steer_angle':  steer,
+                'abs':          0.0,
+                'tc':           0.0,
+                'fuel':         fuel,
+                'max_fuel':     max_fuel,
+                'lap_time':     last_lap,
+                'position':     position,
+                'car_name':     car_name,
+                'track_name':   track_name,
+                'lap_count':    lap,
+                'current_time': cur_s * 1000.0,   # → ms
+                'lap_dist_pct': lap_pct,            # 0-1, exact position on track
+            }
+        except Exception as e:
+            print(f"iRacing read error: {e}")
+            return None
+
+    def is_connected(self):
+        if not self.available or self.ir is None:
+            return False
+        try:
+            return bool(self.ir.is_initialized and self.ir.is_connected)
+        except Exception:
+            return False
+
+    def shutdown(self):
+        if self.ir:
+            try:
+                self.ir.shutdown()
+            except Exception:
+                pass
+
+
 # ---------------------------------------------------------------------------
-# TRACK MAP CENTERLINE
+# TRACK DATA  –  normalized waypoints + turn metadata
+# ---------------------------------------------------------------------------
+# Convention: x=right, y=down, 0–1 fitted inside widget with PAD padding.
+# Circuits flow in the direction a driver travels (clockwise on most maps).
+# Each entry in TURNS:  (lap_fraction 0-1,  label,  name,  circle_offset_x, circle_offset_y)
+#   lap_fraction   – where along the lap this turn sits
+#   label          – short text shown inside the turn circle  (e.g. '1', 'T1')
+#   name           – optional name shown as small text next to the circle
+#   circle_offset  – pixel nudge so circles don't overlap the track line
 # ---------------------------------------------------------------------------
 
-MONZA_LENGTH_M = 5793
-
-# ---------------------------------------------------------------------------
-# MONZA GP ACCURATE CENTERLINE  (normalized 0-1, y=0 top, clockwise from S/F)
-# ---------------------------------------------------------------------------
-# ~80 hand-placed waypoints based on the real circuit geometry.
-# S/F line sits near (0.20, 0.84) – bottom-left of the canvas.
-# The circuit flows: main straight → T1-T2 Rettifilo → Curva Grande (T3)
-# → Roggia (T4-T5) → Lesmo 1 (T6) → Lesmo 2 (T7) → Serraglio
-# → Variante Ascari (T8-T10) → Parabolica (T11) → back to main straight.
-MONZA_NORM: list[tuple[float, float]] = [
-    # ── Main straight (going right / east) ──────────────────────────────
+# ── MONZA GP ─────────────────────────────────────────────────────────────────
+# Clockwise from S/F (bottom-left of canvas).
+# main straight → Rettifilo (T1-T2) → Curva Grande (T3) → Roggia (T4-T5)
+# → Lesmo 1 (T6) → Lesmo 2 (T7) → Serraglio → Ascari (T8-T10) → Parabolica (T11)
+_MONZA_PTS: list[tuple[float, float]] = [
     (0.20, 0.84), (0.30, 0.84), (0.42, 0.84),
     (0.54, 0.84), (0.64, 0.84), (0.72, 0.84),
-    # ── T1-T2  Variante del Rettifilo ───────────────────────────────────
-    (0.77, 0.83), (0.81, 0.81), (0.84, 0.77),   # T1 right apex
-    (0.83, 0.72), (0.80, 0.69), (0.82, 0.65),   # T2 left → exit
-    # ── T3  Curva Grande  (long sweeping right up the right side) ───────
+    (0.77, 0.83), (0.81, 0.81), (0.84, 0.77),
+    (0.83, 0.72), (0.80, 0.69), (0.82, 0.65),
     (0.86, 0.59), (0.88, 0.51), (0.89, 0.43),
-    (0.88, 0.34), (0.85, 0.24), (0.80, 0.15),   # apex area
-    # ── After T3 heading west ────────────────────────────────────────────
+    (0.88, 0.34), (0.85, 0.24), (0.80, 0.15),
     (0.74, 0.09), (0.65, 0.07), (0.56, 0.07),
-    # ── T4-T5  Variante della Roggia ────────────────────────────────────
-    (0.51, 0.06), (0.46, 0.08), (0.45, 0.13),   # T4 right
-    (0.47, 0.17), (0.44, 0.20),                  # T5 left → exit
-    # ── To Lesmos ────────────────────────────────────────────────────────
+    (0.51, 0.06), (0.46, 0.08), (0.45, 0.13),
+    (0.47, 0.17), (0.44, 0.20),
     (0.38, 0.23), (0.31, 0.27), (0.25, 0.32),
-    # ── T6  Lesmo 1 ──────────────────────────────────────────────────────
     (0.19, 0.37), (0.15, 0.43), (0.15, 0.49),
-    # ── T7  Lesmo 2 ──────────────────────────────────────────────────────
     (0.15, 0.55), (0.16, 0.61), (0.19, 0.66),
-    # ── Serraglio straight (heading right / east) ────────────────────────
     (0.25, 0.68), (0.33, 0.70), (0.41, 0.71),
     (0.49, 0.71), (0.56, 0.71),
-    # ── T8-T10  Variante Ascari ──────────────────────────────────────────
-    (0.61, 0.70), (0.64, 0.66), (0.63, 0.62),   # T8 right
-    (0.60, 0.58), (0.58, 0.55), (0.60, 0.52),   # T9 left → T10 right
+    (0.61, 0.70), (0.64, 0.66), (0.63, 0.62),
+    (0.60, 0.58), (0.58, 0.55), (0.60, 0.52),
     (0.64, 0.51), (0.67, 0.52),
-    # ── To T11 Parabolica ────────────────────────────────────────────────
     (0.71, 0.54), (0.75, 0.57),
-    # ── T11  Parabolica  (long right-hander) ────────────────────────────
     (0.79, 0.60), (0.82, 0.65), (0.84, 0.70),
     (0.85, 0.76), (0.83, 0.81), (0.79, 0.85),
-    # ── Exit Parabolica back onto main straight ──────────────────────────
     (0.70, 0.86), (0.57, 0.85), (0.43, 0.85), (0.30, 0.84),
-    # (closes to 0.20, 0.84)
+]
+# (frac, circle_label, hover_name, cx_off, cy_off)
+_MONZA_TURNS = [
+    (0.09, '1',  'Rettifilo',    16, -14),
+    (0.12, '2',  '',            -20,  -8),
+    (0.21, '3',  'Curva Grande', 12, -16),
+    (0.29, '4',  'Roggia',       12, -14),
+    (0.32, '5',  '',            -20,  12),
+    (0.41, '6',  'Lesmo 1',     -52,   4),
+    (0.47, '7',  'Lesmo 2',     -50,   4),
+    (0.57, '8',  'Ascari',       12,  14),
+    (0.64, '10', '',             12, -12),
+    (0.71, '11', 'Parabolica',  -66,  16),
 ]
 
-# Turn annotations: (lap_fraction_0_to_1, short_label, px_offset_x, px_offset_y)
-MONZA_TURNS: list[tuple[float, str, int, int]] = [
-    (0.09,  'T1',          14, -14),
-    (0.12,  'T2',         -28,  -8),
-    (0.21,  'Curva\nGrande', 10, -18),
-    (0.29,  'T4',           10, -16),
-    (0.32,  'T5',          -28,  12),
-    (0.41,  'Lesmo 1',     -60,   4),
-    (0.47,  'Lesmo 2',     -56,   4),
-    (0.58,  'T8',           10,  14),
-    (0.64,  'T10',          10, -14),
-    (0.71,  'Parabolica',  -72,  16),
+# ── SILVERSTONE GP ────────────────────────────────────────────────────────────
+# S/F at bottom-center, cars exit LEFT (west) toward T1 Abbey.
+# Abbey (T1) → Farm (T2) → Arena complex (T3-T5)
+# → Brooklands (T6) → Luffield (T7) → Woodcote (T8)
+# → Copse (T9) → Maggots (T10-T11) → Becketts (T12-T13) → Chapel (T14)
+# → Hangar Straight → Stowe (T15) → Vale (T16) → Village/Club (T17-T18)
+# → pit straight back to S/F
+_SILVERSTONE_PTS: list[tuple[float, float]] = [
+    # ── S/F, pit straight going LEFT ──────────────────────────────────────
+    (0.49, 0.85),
+    (0.43, 0.85), (0.37, 0.85),
+    # ── T1  Abbey – right-hander (west → north) ───────────────────────────
+    (0.33, 0.83), (0.30, 0.80), (0.29, 0.77), (0.31, 0.74),
+    # ── T2  Farm – right-hander ────────────────────────────────────────────
+    (0.33, 0.71), (0.34, 0.68), (0.35, 0.65), (0.37, 0.63), (0.39, 0.61),
+    # ── Arena T3-T5 (inner complex) ───────────────────────────────────────
+    (0.41, 0.59), (0.43, 0.57), (0.44, 0.55),   # T3 right
+    (0.45, 0.52), (0.44, 0.49), (0.42, 0.48),   # T4 left
+    (0.40, 0.46), (0.41, 0.44), (0.43, 0.44),   # T5 right
+    # ── Exit Arena, heading west-southwest toward Brooklands ──────────────
+    (0.40, 0.43), (0.36, 0.43), (0.30, 0.45), (0.25, 0.49),
+    # ── T6  Brooklands – left then right chicane ──────────────────────────
+    (0.22, 0.52), (0.20, 0.56),                  # T6 left
+    (0.22, 0.59), (0.24, 0.61),                  # T6 right
+    # ── Heading south to T7 Luffield ──────────────────────────────────────
+    (0.23, 0.64),
+    # ── T7  Luffield – right-hander ───────────────────────────────────────
+    (0.21, 0.67), (0.19, 0.66), (0.17, 0.63),
+    # ── Heading north (up left side) through T8 Woodcote ─────────────────
+    (0.16, 0.58), (0.15, 0.52), (0.14, 0.47), (0.14, 0.41), (0.15, 0.36),
+    # ── T9  Copse – fast right-hander (north → east) ─────────────────────
+    (0.16, 0.29), (0.17, 0.24), (0.20, 0.20), (0.24, 0.17),
+    # ── T10-T11  Maggots – left-right ─────────────────────────────────────
+    (0.29, 0.15), (0.34, 0.13), (0.37, 0.12), (0.40, 0.12),
+    (0.42, 0.11), (0.44, 0.11),
+    # ── T12-T13  Becketts ─────────────────────────────────────────────────
+    (0.47, 0.10), (0.49, 0.10), (0.52, 0.11), (0.54, 0.12),
+    # ── T14  Chapel – sweeping right ──────────────────────────────────────
+    (0.57, 0.15), (0.62, 0.18), (0.65, 0.22),
+    # ── Hangar Straight – heading south-east ──────────────────────────────
+    (0.69, 0.27), (0.73, 0.33), (0.77, 0.39),
+    # ── T15  Stowe – right-hander at far right ────────────────────────────
+    (0.83, 0.43), (0.87, 0.47), (0.88, 0.52),
+    (0.87, 0.57), (0.85, 0.61),
+    # ── T16  Vale ─────────────────────────────────────────────────────────
+    (0.83, 0.65), (0.82, 0.68),
+    # ── T17-T18  Village / Club ────────────────────────────────────────────
+    (0.80, 0.71), (0.77, 0.74), (0.74, 0.76), (0.71, 0.77),
+    (0.68, 0.77), (0.64, 0.78),
+    # ── Return along bottom to S/F ────────────────────────────────────────
+    (0.59, 0.81), (0.55, 0.83), (0.52, 0.85),
+    # (closes to 0.49, 0.85)
 ]
+_SILVERSTONE_TURNS = [
+    (0.05,  '1',  'Abbey',      -50, -12),
+    (0.10,  '2',  'Farm',       -40, -12),
+    (0.15,  '3',  'Arena',       12,  14),
+    (0.25,  '6',  'Brooklands', -56,  10),
+    (0.30,  '7',  'Luffield',   -52,  12),
+    (0.38,  '9',  'Copse',       12, -14),
+    (0.42,  '10', 'Maggots',      6,  14),
+    (0.47,  '12', 'Becketts',     6,  14),
+    (0.52,  '14', 'Chapel',      12, -14),
+    (0.62,  '15', 'Stowe',       12,   6),
+    (0.69,  '16', 'Vale',        12,  10),
+    (0.74,  '18', 'Club',        12,  10),
+]
+
+# ── Track registry ────────────────────────────────────────────────────────────
+TRACKS: dict = {
+    'monza': {
+        'name':     'Monza GP',
+        'pts':      _MONZA_PTS,
+        'turns':    _MONZA_TURNS,
+        'length_m': 5793,
+    },
+    'silverstone': {
+        'name':     'Silverstone GP',
+        'pts':      _SILVERSTONE_PTS,
+        'turns':    _SILVERSTONE_TURNS,
+        'length_m': 5891,
+    },
+}
+
+# Map substrings of the track name returned by telemetry to a TRACKS key
+TRACK_NAME_MAP: dict[str, str] = {
+    'monza':        'monza',
+    'silverstone':  'silverstone',
+    'ks_monza':     'monza',
+    'ks_silverstone': 'silverstone',
+}
+
+DEFAULT_TRACK = 'monza'
+
+# Compat alias so graph widgets that reference MONZA_LENGTH_M still compile.
+# TelemetryApp updates this at runtime when the active track changes.
+MONZA_LENGTH_M: int = TRACKS['monza']['length_m']
 
 # Number of distance-buckets used to store per-position telemetry
 N_TRACK_SEG = 220
@@ -707,23 +906,39 @@ class TrackMapWidget(QWidget):
     """
 
     PAD   = 28   # canvas padding in px
-    W_OUT = 18   # outer track-surface stroke width
+    W_OUT = 22   # outer track-surface stroke width  (thicker = bolder look)
     W_IN  =  8   # inner data-colour stroke width
 
-    def __init__(self, parent=None):
+    def __init__(self, track_key: str = DEFAULT_TRACK, parent=None):
         super().__init__(parent)
         self.setMinimumSize(440, 370)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         self.car_progress  = 0.0
-        self._throttle_map = [0.0] * N_TRACK_SEG   # 0-100 per bucket
+        self._throttle_map = [0.0] * N_TRACK_SEG
         self._brake_map    = [0.0] * N_TRACK_SEG
 
         # Cached scaled point list – rebuilt on resize
         self._pts: list[tuple[float, float]] = []
         self._last_sz: tuple[int, int] = (0, 0)
 
+        # Active track data
+        self._norm:  list[tuple[float, float]] = []
+        self._turns: list                       = []
+        self._track_name: str                   = ''
+        self.set_track(track_key)
+
     # ------------------------------------------------------------------ API
+    def set_track(self, key: str):
+        """Switch to a different track layout (resets telemetry map)."""
+        td = TRACKS.get(key) or TRACKS[DEFAULT_TRACK]
+        self._norm       = td['pts']
+        self._turns      = td['turns']
+        self._track_name = td['name']
+        self._pts        = []          # invalidate cache
+        self._last_sz    = (0, 0)
+        self.reset()
+
     def update_telemetry(self, lap_progress: float, throttle: float, brake: float):
         self.car_progress = max(0.0, min(1.0, lap_progress))
         bucket = int(lap_progress * N_TRACK_SEG) % N_TRACK_SEG
@@ -747,7 +962,7 @@ class TrackMapWidget(QWidget):
         self._pts = [
             (pad + x * (w - 2 * pad),
              pad + y * (h - 2 * pad))
-            for x, y in MONZA_NORM
+            for x, y in self._norm
         ]
         self._last_sz = sz
         return self._pts
@@ -811,43 +1026,71 @@ class TrackMapWidget(QWidget):
             painter.setPen(QPen(col, self.W_IN, Qt.PenStyle.SolidLine, cap, join))
             painter.drawLine(p1, p2)
 
-        # ── S/F line ──────────────────────────────────────────────────────
-        # Drawn as a short perpendicular white bar at the first waypoint
+        # ── S/F line  (checkerboard-style double bar) ─────────────────────
         sx, sy = pts[0]
-        painter.setPen(QPen(QColor('#ffffff'), 2))
-        painter.drawLine(QPointF(sx, sy - 9), QPointF(sx, sy + 9))
+        for i, col_hex in enumerate(['#ffffff', '#000000', '#ffffff']):
+            painter.setPen(QPen(QColor(col_hex), 2))
+            off = (i - 1) * 4
+            painter.drawLine(QPointF(sx + off, sy - 10), QPointF(sx + off, sy + 10))
+        sf_font = QFont()
+        sf_font.setPointSize(6)
+        sf_font.setBold(True)
+        painter.setFont(sf_font)
+        painter.setPen(QColor('#cccccc'))
+        painter.drawText(int(sx + 8), int(sy - 4), 'S/F')
 
-        # ── Turn labels ───────────────────────────────────────────────────
-        lbl_font = QFont()
-        lbl_font.setPointSize(7)
-        painter.setFont(lbl_font)
-        for frac, label, ox, oy in MONZA_TURNS:
+        # ── Track name ────────────────────────────────────────────────────
+        name_font = QFont()
+        name_font.setPointSize(7)
+        painter.setFont(name_font)
+        painter.setPen(QColor('#444444'))
+        painter.drawText(self.PAD, self.PAD - 6, self._track_name)
+
+        # ── Turn circles  (reference-image style: circle + number + name) ─
+        num_font = QFont()
+        num_font.setPointSize(6)
+        num_font.setBold(True)
+        name_font2 = QFont()
+        name_font2.setPointSize(6)
+        CR = 8   # circle radius in px
+
+        for frac, lbl, tname, ox, oy in self._turns:
             idx = int(frac * n) % n
             lx, ly = pts[idx]
-            # Small dot at apex
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QBrush(QColor('#555555')))
-            painter.drawEllipse(QPointF(lx, ly), 4, 4)
-            # Label
-            painter.setPen(QColor('#707070'))
-            for dy, line in enumerate(label.split('\n')):
-                painter.drawText(int(lx + ox), int(ly + oy + dy * 11), line)
+            cp2 = QPointF(lx + ox, ly + oy)
+
+            # Filled circle
+            painter.setPen(QPen(QColor('#c0c0c0'), 1.2))
+            painter.setBrush(QBrush(QColor('#1a1a1a')))
+            painter.drawEllipse(cp2, CR, CR)
+
+            # Number text centred inside circle
+            painter.setFont(num_font)
+            painter.setPen(QColor('#e8e8e8'))
+            r = QRectF(cp2.x() - CR, cp2.y() - CR, CR * 2, CR * 2)
+            painter.drawText(r, Qt.AlignmentFlag.AlignCenter, lbl)
+
+            # Corner name in dim text beside the circle
+            if tname:
+                painter.setFont(name_font2)
+                painter.setPen(QColor('#555555'))
+                # Place name below/above depending on oy sign
+                ny = int(cp2.y() + (CR + 9 if oy >= 0 else -CR - 3))
+                painter.drawText(int(cp2.x() - 20), ny, tname)
 
         # ── Car position dot (glowing red) ───────────────────────────────
         car_idx = int(self.car_progress * n) % n
         cx, cy  = pts[car_idx]
         cp      = QPointF(cx, cy)
 
-        # Outer glow
         grad = QRadialGradient(cp, 14)
-        grad.setColorAt(0.0, QColor(255, 60,  60, 200))
+        grad.setColorAt(0.0, QColor(255, 60,  60, 210))
         grad.setColorAt(0.5, QColor(255, 60,  60,  80))
         grad.setColorAt(1.0, QColor(255, 60,  60,   0))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QBrush(grad))
         painter.drawEllipse(cp, 14, 14)
 
-        # Solid centre
         painter.setBrush(QBrush(QColor('#ff3c3c')))
         painter.setPen(QPen(QColor('#ffffff'), 1.5))
         painter.drawEllipse(cp, 5, 5)
@@ -1210,8 +1453,9 @@ class TelemetryApp(QMainWindow):
         self.setWindowTitle('AC / ACC Telemetry')
         self.setGeometry(100, 100, 1640, 980)
 
-        self.ac_reader = None
+        self.ac_reader  = None
         self.acc_reader = ACCReader()
+        self.ir_reader  = IRacingReader()
         self.current_reader = None
         self.auto_detect = True
 
@@ -1220,6 +1464,10 @@ class TelemetryApp(QMainWindow):
 
         self.session_laps = []
         self._reset_current_lap_data()
+
+        # Track selection (None = auto-detect from telemetry data)
+        self._active_track_key: str | None = None
+        self._auto_track = True
 
         self._init_ui()
 
@@ -1278,11 +1526,28 @@ class TelemetryApp(QMainWindow):
         game_lbl.setFont(sans(8))
         game_lbl.setStyleSheet(f'color: {TXT2}; letter-spacing: 1px;')
         self.game_combo = QComboBox()
-        self.game_combo.addItems(['Auto-Detect', 'AC (UDP)', 'ACC (Shared Memory)'])
+        self.game_combo.addItems([
+            'Auto-Detect', 'ACC (Shared Memory)', 'AC (UDP)', 'iRacing (SDK)',
+        ])
         self.game_combo.setFixedWidth(170)
         self.game_combo.currentTextChanged.connect(self._on_game_changed)
         layout.addWidget(game_lbl)
         layout.addWidget(self.game_combo)
+
+        layout.addWidget(_vsep())
+
+        # Track selector
+        track_lbl = QLabel('TRACK')
+        track_lbl.setFont(sans(8))
+        track_lbl.setStyleSheet(f'color: {TXT2}; letter-spacing: 1px;')
+        self.track_combo = QComboBox()
+        self.track_combo.addItem('Auto-Detect', userData=None)
+        for key, td in TRACKS.items():
+            self.track_combo.addItem(td['name'], userData=key)
+        self.track_combo.setFixedWidth(155)
+        self.track_combo.currentIndexChanged.connect(self._on_track_changed)
+        layout.addWidget(track_lbl)
+        layout.addWidget(self.track_combo)
 
         layout.addWidget(_vsep())
 
@@ -1657,27 +1922,57 @@ class TelemetryApp(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_game_changed(self, game: str):
+        self.auto_detect = False
         if game == 'Auto-Detect':
             self.auto_detect = True
             self.current_reader = None
-        elif game == 'AC (UDP)':
-            self.auto_detect = False
+        elif game == 'ACC (Shared Memory)':
+            self.current_reader = self.acc_reader
+        elif game == 'iRacing (SDK)':
+            self.current_reader = self.ir_reader
+        else:  # 'AC (UDP)'
             if self.ac_reader:
                 self.ac_reader.disconnect()
             self.ac_reader = ACUDPReader(self.udp_host.text(), int(self.udp_port.text()))
             self.current_reader = self.ac_reader
-        else:
-            self.auto_detect = False
-            self.current_reader = self.acc_reader
 
     def _detect_game(self):
+        """Priority: ACC → iRacing → AC UDP."""
         if self.acc_reader.is_connected():
             return self.acc_reader
+        if self.ir_reader.is_connected():
+            return self.ir_reader
         if not self.ac_reader:
             self.ac_reader = ACUDPReader(self.udp_host.text(), int(self.udp_port.text()))
         if self.ac_reader.is_connected():
             return self.ac_reader
         return None
+
+    # ------------------------------------------------------------------
+    # TRACK SELECTION / AUTO-DETECT
+    # ------------------------------------------------------------------
+
+    def _on_track_changed(self, index: int):
+        key = self.track_combo.itemData(index)   # None = Auto-Detect
+        self._auto_track = (key is None)
+        if key and key in TRACKS:
+            self._apply_track(key)
+
+    def _apply_track(self, key: str):
+        global MONZA_LENGTH_M
+        self._active_track_key = key
+        self.track_map.set_track(key)
+        MONZA_LENGTH_M = TRACKS[key]['length_m']
+
+    def _auto_detect_track(self, track_name: str):
+        if not self._auto_track:
+            return
+        name_lc = track_name.lower()
+        for substr, key in TRACK_NAME_MAP.items():
+            if substr in name_lc:
+                if key != self._active_track_key:
+                    self._apply_track(key)
+                return
 
     # ------------------------------------------------------------------
     # TELEMETRY UPDATE LOOP
@@ -1721,19 +2016,24 @@ class TelemetryApp(QMainWindow):
         self.current_lap_count = current_lap
         self.last_lap_time = current_time
 
-        game_type = 'AC' if isinstance(self.current_reader, ACUDPReader) else 'ACC'
+        if isinstance(self.current_reader, ACUDPReader):
+            game_type = 'AC'
+        elif isinstance(self.current_reader, IRacingReader):
+            game_type = 'iRacing'
+        else:
+            game_type = 'ACC'
         self.connection_dot.setStyleSheet(f'color: {C_THROTTLE};')
         self.connection_label.setText(f'CONNECTED  ·  {game_type}')
         self.connection_label.setStyleSheet(f'color: {TXT}; letter-spacing: 0.5px;')
 
-        # Gear text
+        # Gear text  (all readers normalise to: 0=R, 1=N, 2+=1st,2nd,…)
         gear = data['gear']
         if gear == 0:
             gear_text = 'R'
         elif gear == 1:
             gear_text = 'N'
         else:
-            gear_text = str(gear - 1) if isinstance(self.current_reader, ACCReader) else str(gear)
+            gear_text = str(gear - 1)  # 2→1st, 3→2nd, …
 
         # ── Dashboard updates ────────────────────────────────────────────
         self.speed_value.set_value(f"{int(data['speed'])}")
@@ -1754,6 +2054,7 @@ class TelemetryApp(QMainWindow):
 
         self.car_label.setText(data['car_name'])
         self.track_label.setText(data['track_name'])
+        self._auto_detect_track(data['track_name'])
 
         fuel = data['fuel']
         self.fuel_display.set_value(f"{fuel:.1f}")
@@ -1777,9 +2078,15 @@ class TelemetryApp(QMainWindow):
         self.aids_graph.update_data(data['abs'], data['tc'])
 
         # ── Lap Analysis updates ─────────────────────────────────────────
+        # iRacing provides exact lap fraction; other sims estimate from time.
         lap_dur_ms = 90000
-        lap_progress = min(1.0, current_time / lap_dur_ms) if lap_dur_ms > 0 else 0
-        distance_m = lap_progress * MONZA_LENGTH_M
+        if 'lap_dist_pct' in data and data['lap_dist_pct'] > 0:
+            lap_progress = float(data['lap_dist_pct'])
+        else:
+            lap_progress = min(1.0, current_time / lap_dur_ms) if lap_dur_ms > 0 else 0
+        _track_length_m = TRACKS.get(self._active_track_key or DEFAULT_TRACK,
+                                     TRACKS[DEFAULT_TRACK])['length_m']
+        distance_m = lap_progress * _track_length_m
         self.track_map.update_telemetry(lap_progress, data['throttle'], data['brake'])
 
         ref_lap_s = 101.475
@@ -1793,7 +2100,7 @@ class TelemetryApp(QMainWindow):
         self.ana_steer.update_data(distance_m, steer_deg)
 
         n = len(self.current_lap_data.get('time_ms', []))
-        dists = [(self.current_lap_data['time_ms'][i] / lap_dur_ms) * MONZA_LENGTH_M
+        dists = [(self.current_lap_data['time_ms'][i] / lap_dur_ms) * _track_length_m
                  for i in range(n)] if n else []
         deltas = [0.1 * math.sin(d / 500) for d in dists] if dists else []
         self.time_delta_graph.update_data(dists, deltas, distance_m)
