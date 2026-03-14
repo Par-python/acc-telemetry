@@ -389,8 +389,8 @@ class ACCReader(TelemetryReader):
                 'lap_count': sm.Graphics.completed_lap,
                 'current_time': sm.Graphics.current_time,
                 'lap_dist_pct': sm.Graphics.normalized_car_position,
-                'world_x': sm.Physics.car_coordinates[0],
-                'world_z': sm.Physics.car_coordinates[2],
+                'world_x': sm.Graphics.car_coordinates[0].x,
+                'world_z': sm.Graphics.car_coordinates[0].z,
             }
         except Exception as e:
             print(f"ACC read error: {e}")
