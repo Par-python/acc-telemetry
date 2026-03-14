@@ -892,6 +892,62 @@ class SteeringWidget(QWidget):
         painter.end()
 
 
+class SteeringBar(QWidget):
+    """Compact horizontal steering indicator — replaces the circular wheel."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.angle = 0.0
+        self.setFixedHeight(22)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def set_angle(self, angle: float):
+        self.angle = angle
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        cx, cy = w // 2, h // 2
+
+        deg = math.degrees(self.angle)
+        t = max(-1.0, min(1.0, deg / 270.0))
+        ix = int(cx + t * (cx - 14))
+
+        abs_deg = abs(deg)
+        color = QColor(C_THROTTLE if abs_deg < 90 else (C_TC if abs_deg < 180 else C_BRAKE))
+
+        # Track bar
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor(BG3)))
+        painter.drawRoundedRect(8, cy - 2, w - 16, 4, 2, 2)
+
+        # Filled portion toward center
+        fill_x = min(cx, ix) if t < 0 else cx
+        fill_w = abs(ix - cx)
+        if fill_w > 0:
+            painter.setBrush(QBrush(color))
+            painter.drawRect(fill_x, cy - 2, fill_w, 4)
+
+        # Center notch
+        painter.setPen(QPen(QColor(BORDER2), 1))
+        painter.drawLine(cx, cy - 6, cx, cy + 6)
+
+        # Indicator dot
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(color))
+        painter.drawEllipse(ix - 7, cy - 7, 14, 14)
+
+        # Angle label
+        painter.setFont(mono(7))
+        painter.setPen(QColor(TXT2))
+        lbl = f'{deg:+.1f}°'
+        painter.drawText(QRectF(0, 0, w, h), Qt.AlignmentFlag.AlignCenter, lbl)
+
+        painter.end()
+
+
 class TrackMapWidget(QWidget):
     """
     MoTeC-style live track map for Monza GP.
@@ -2014,208 +2070,223 @@ class TelemetryApp(QMainWindow):
 
     def _build_dashboard_tab(self) -> QWidget:
         tab = QWidget()
-        outer = QHBoxLayout(tab)
-        outer.setContentsMargins(10, 10, 10, 10)
-        outer.setSpacing(10)
-
-        # ── LEFT: instruments panel ──────────────────────────────────────
-        instruments = QWidget()
-        main = QVBoxLayout(instruments)
-        main.setContentsMargins(0, 0, 0, 0)
+        main = QVBoxLayout(tab)
+        main.setContentsMargins(10, 10, 10, 10)
         main.setSpacing(8)
 
-        # ── RIGHT: lap history panel ─────────────────────────────────────
-        self.lap_history = LapHistoryPanel()
-        self.lap_history.setMinimumWidth(340)
-        self.lap_history.setMaximumWidth(420)
-
-        def _card(stretch_v=False) -> tuple:
-            f = QFrame()
-            f.setStyleSheet(f'background: {BG2}; border: 1px solid {BORDER}; border-radius: 6px;')
-            l = QVBoxLayout(f)
-            l.setContentsMargins(12, 10, 12, 10)
-            l.setSpacing(6)
-            return f, l
-
-        def _label(text, font, color, align=None, letter_spacing='') -> QLabel:
-            lbl = QLabel(text)
-            lbl.setFont(font)
-            style = f'color: {color};'
-            if letter_spacing:
-                style += f' letter-spacing: {letter_spacing};'
-            lbl.setStyleSheet(style)
-            if align:
-                lbl.setAlignment(align)
-            return lbl
-
         # ══════════════════════════════════════════════════════════════════
-        # ROW 1 — RPM bar (full width, with ABS/TC inline)
+        # ROW 1 — Instrument cluster (single full-width card)
         # ══════════════════════════════════════════════════════════════════
-        rpm_card, rpm_layout = _card()
-        rpm_layout.setSpacing(4)
+        cluster = QFrame()
+        cluster.setStyleSheet(
+            f'background: {BG2}; border: 1px solid {BORDER}; border-radius: 6px;')
+        cluster_vbox = QVBoxLayout(cluster)
+        cluster_vbox.setContentsMargins(0, 0, 0, 0)
+        cluster_vbox.setSpacing(0)
 
-        rpm_top = QHBoxLayout()
-        rpm_top.setSpacing(8)
-        rpm_lbl = _label('RPM', sans(8), TXT2, letter_spacing='1.5px')
-        self.rpm_numbers = _label('0 / 8000', mono(10), TXT2)
-        rpm_top.addWidget(rpm_lbl)
-        rpm_top.addStretch()
+        # ── RPM bar flush at top, full width ──────────────────────────
+        self.rev_bar = RevBar()
+        self.rev_bar.setFixedHeight(44)
+        cluster_vbox.addWidget(self.rev_bar)
 
-        # ABS / TC inline chips
+        # ── RPM numbers + ABS/TC row ──────────────────────────────────
+        rpm_strip = QHBoxLayout()
+        rpm_strip.setContentsMargins(14, 4, 14, 4)
+        rpm_strip.setSpacing(8)
+
+        rpm_lbl = QLabel('RPM')
+        rpm_lbl.setFont(sans(7))
+        rpm_lbl.setStyleSheet(f'color: {TXT2}; letter-spacing: 1px;')
+        self.rpm_numbers = QLabel('0 / 8000')
+        self.rpm_numbers.setFont(mono(8))
+        self.rpm_numbers.setStyleSheet(f'color: {TXT2};')
+
         self.abs_badge = _AidBadge('ABS')
         self.tc_badge  = _AidBadge('TC')
-        for badge in (self.abs_badge, self.tc_badge):
-            badge.setFixedHeight(22)
-            rpm_top.addWidget(badge)
+        for b in (self.abs_badge, self.tc_badge):
+            b.setFixedHeight(20)
 
-        rpm_top.addSpacing(12)
-        rpm_top.addWidget(self.rpm_numbers)
-        rpm_layout.addLayout(rpm_top)
+        rpm_strip.addWidget(rpm_lbl)
+        rpm_strip.addWidget(self.rpm_numbers)
+        rpm_strip.addStretch()
+        rpm_strip.addWidget(self.abs_badge)
+        rpm_strip.addWidget(self.tc_badge)
+        cluster_vbox.addLayout(rpm_strip)
 
-        self.rev_bar = RevBar()
-        self.rev_bar.setFixedHeight(28)
-        rpm_layout.addWidget(self.rev_bar)
+        # ── Divider ───────────────────────────────────────────────────
+        div = QFrame()
+        div.setFrameShape(QFrame.Shape.HLine)
+        div.setFixedHeight(1)
+        div.setStyleSheet(f'background: {BORDER}; border: none;')
+        cluster_vbox.addWidget(div)
 
-        main.addWidget(rpm_card)
+        # ── Three-column inner section ────────────────────────────────
+        inner = QHBoxLayout()
+        inner.setContentsMargins(0, 0, 0, 0)
+        inner.setSpacing(0)
 
-        # ══════════════════════════════════════════════════════════════════
-        # ROW 2 — Gear | Speed hero | Pedals
-        # ══════════════════════════════════════════════════════════════════
-        row2 = QHBoxLayout()
-        row2.setSpacing(8)
+        def _vsep():
+            s = QFrame()
+            s.setFrameShape(QFrame.Shape.VLine)
+            s.setFixedWidth(1)
+            s.setStyleSheet(f'background: {BORDER}; border: none;')
+            return s
 
-        # ── Gear card (narrow, very large number) ─────────────────────
-        gear_card, gear_layout = _card()
-        gear_card.setFixedWidth(110)
-        gear_layout.setContentsMargins(8, 10, 8, 10)
-        gear_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        gear_lbl_title = _label('GEAR', sans(8), TXT2, Qt.AlignmentFlag.AlignCenter, '1.5px')
-        gear_layout.addWidget(gear_lbl_title)
-        self.gear_value = QLabel('N')
-        self.gear_value.setFont(mono(72, bold=True))
-        self.gear_value.setStyleSheet(f'color: {C_GEAR};')
-        self.gear_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        gear_layout.addWidget(self.gear_value)
-        gear_layout.addStretch()
-        row2.addWidget(gear_card)
+        # ── COLUMN A: Pedals ─────────────────────────────────────────
+        ped_widget = QWidget()
+        ped_widget.setStyleSheet('background: transparent;')
+        ped_widget.setFixedWidth(96)
+        ped_vbox = QVBoxLayout(ped_widget)
+        ped_vbox.setContentsMargins(10, 14, 10, 14)
+        ped_vbox.setSpacing(6)
 
-        # ── Speed hero card (large number centered) ───────────────────
-        speed_card, speed_layout = _card()
-        speed_layout.setContentsMargins(16, 14, 16, 14)
-        speed_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        ped_title = QLabel('INPUTS')
+        ped_title.setFont(sans(7))
+        ped_title.setStyleSheet(f'color: {TXT2}; letter-spacing: 1px;')
+        ped_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        ped_vbox.addWidget(ped_title)
 
-        spd_val_row = QHBoxLayout()
-        spd_val_row.setSpacing(6)
-        spd_val_row.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.speed_value = QLabel('0')
-        self.speed_value.setFont(mono(80, bold=True))
-        self.speed_value.setStyleSheet(f'color: {C_SPEED};')
-        spd_unit = _label('km/h', sans(14), TXT2)
-        spd_unit.setAlignment(Qt.AlignmentFlag.AlignBottom)
-        spd_val_row.addStretch()
-        spd_val_row.addWidget(self.speed_value)
-        spd_val_row.addWidget(spd_unit)
-        spd_val_row.addStretch()
-
-        spd_title = _label('SPEED', sans(8), TXT2, Qt.AlignmentFlag.AlignCenter, '1.5px')
-        speed_layout.addWidget(spd_title)
-        speed_layout.addLayout(spd_val_row)
-        speed_layout.addStretch()
-        row2.addWidget(speed_card, stretch=1)
-
-        # ── Pedals card (two tall vertical bars side by side) ─────────
-        pedals_card, pedals_layout = _card()
-        pedals_card.setFixedWidth(120)
-        pedals_layout.setContentsMargins(10, 10, 10, 10)
-
-        pedals_title = _label('INPUTS', sans(8), TXT2, letter_spacing='1.5px')
-        pedals_layout.addWidget(pedals_title)
-
-        bars_row = QHBoxLayout()
-        bars_row.setSpacing(12)
-        bars_row.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        for color, attr, label_text in [
+        ped_bars = QHBoxLayout()
+        ped_bars.setSpacing(10)
+        ped_bars.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        for color, attr, txt in [
             (C_THROTTLE, 'throttle_bar', 'THR'),
             (C_BRAKE,    'brake_bar',    'BRK'),
         ]:
             col = QVBoxLayout()
             col.setSpacing(4)
             col.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-            bar = PedalBar(color, label_text)
-            bar.setFixedWidth(36)
-            bar.setMinimumHeight(120)
+            bar = PedalBar(color, txt)
+            bar.setFixedWidth(30)
+            bar.setMinimumHeight(110)
             setattr(self, attr, bar)
-            lbl = _label(label_text, sans(7), color, Qt.AlignmentFlag.AlignCenter)
+            lbl = QLabel(txt)
+            lbl.setFont(sans(6))
+            lbl.setStyleSheet(f'color: {color}; letter-spacing: 0.5px;')
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             col.addWidget(bar)
             col.addWidget(lbl)
-            bars_row.addLayout(col)
+            ped_bars.addLayout(col)
+        ped_vbox.addLayout(ped_bars, stretch=1)
 
-        pedals_layout.addLayout(bars_row, stretch=1)
-        row2.addWidget(pedals_card)
+        inner.addWidget(ped_widget)
+        inner.addWidget(_vsep())
 
-        main.addLayout(row2, stretch=1)
+        # ── COLUMN B: Hero — Gear + Speed + Steering ──────────────────
+        hero_widget = QWidget()
+        hero_widget.setStyleSheet('background: transparent;')
+        hero_vbox = QVBoxLayout(hero_widget)
+        hero_vbox.setContentsMargins(28, 14, 28, 14)
+        hero_vbox.setSpacing(8)
 
-        # ══════════════════════════════════════════════════════════════════
-        # ROW 3 — Steering wheel | Info strip (fuel / position / last lap)
-        # ══════════════════════════════════════════════════════════════════
-        row3 = QHBoxLayout()
-        row3.setSpacing(8)
+        # Gear + Speed side by side
+        gs_row = QHBoxLayout()
+        gs_row.setSpacing(24)
+        gs_row.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter)
 
-        # Steering card
-        steer_card, steer_layout = _card()
-        steer_layout.setContentsMargins(10, 8, 10, 8)
-        steer_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        steer_lbl = _label('STEERING', sans(8), TXT2, Qt.AlignmentFlag.AlignCenter, '1.5px')
-        steer_layout.addWidget(steer_lbl)
-        self.steering_widget = SteeringWidget()
-        self.steering_widget.setMinimumSize(130, 130)
-        steer_layout.addWidget(self.steering_widget)
-        row3.addWidget(steer_card)
+        for num_color, title_txt, attr, fsize in [
+            (C_GEAR,  'GEAR',  'gear_value',  72),
+            (C_SPEED, 'SPEED', 'speed_value', 72),
+        ]:
+            blk = QVBoxLayout()
+            blk.setSpacing(0)
+            blk.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        # Info strip — three horizontal mini-cards
-        info_strip = QHBoxLayout()
-        info_strip.setSpacing(8)
+            t = QLabel(title_txt)
+            t.setFont(sans(7))
+            t.setStyleSheet(f'color: {TXT2}; letter-spacing: 2px;')
+            t.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        def _info_card(dot_color, title, attr, font_size=20, unit=''):
-            f = QFrame()
-            f.setStyleSheet(f'background: {BG2}; border: 1px solid {BORDER}; border-radius: 6px;')
-            l = QVBoxLayout(f)
-            l.setContentsMargins(14, 10, 14, 10)
-            l.setSpacing(4)
+            v = QLabel('N' if attr == 'gear_value' else '0')
+            v.setFont(mono(fsize, bold=True))
+            v.setStyleSheet(f'color: {num_color};')
+            v.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            setattr(self, attr, v)
 
+            blk.addWidget(t)
+            blk.addWidget(v)
+            gs_row.addLayout(blk)
+
+        # km/h unit label under speed
+        unit_row = QHBoxLayout()
+        unit_row.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        unit_lbl = QLabel('km/h')
+        unit_lbl.setFont(sans(10))
+        unit_lbl.setStyleSheet(f'color: {TXT2};')
+        unit_row.addSpacing(96 + 24)   # align under speed column
+        unit_row.addWidget(unit_lbl)
+        unit_row.addStretch()
+
+        hero_vbox.addLayout(gs_row, stretch=1)
+        hero_vbox.addLayout(unit_row)
+
+        # Steering bar at bottom of hero
+        steer_row = QHBoxLayout()
+        steer_row.setSpacing(8)
+        steer_lbl = QLabel('STEER')
+        steer_lbl.setFont(sans(7))
+        steer_lbl.setStyleSheet(f'color: {TXT2}; letter-spacing: 1px;')
+        self.steering_widget = SteeringBar()
+        steer_row.addWidget(steer_lbl)
+        steer_row.addWidget(self.steering_widget, stretch=1)
+        hero_vbox.addLayout(steer_row)
+
+        inner.addWidget(hero_widget, stretch=1)
+        inner.addWidget(_vsep())
+
+        # ── COLUMN C: Info — Fuel / Position / Lap ───────────────────
+        info_widget = QWidget()
+        info_widget.setStyleSheet('background: transparent;')
+        info_widget.setFixedWidth(200)
+        info_vbox = QVBoxLayout(info_widget)
+        info_vbox.setContentsMargins(16, 14, 16, 14)
+        info_vbox.setSpacing(10)
+
+        def _stat(dot_color, title, attr, fsize=20, unit=''):
+            row = QVBoxLayout()
+            row.setSpacing(1)
             hdr = QHBoxLayout()
+            hdr.setSpacing(5)
             dot = QLabel('●')
-            dot.setFont(sans(7))
+            dot.setFont(sans(6))
             dot.setStyleSheet(f'color: {dot_color};')
+            lbl = QLabel(title)
+            lbl.setFont(sans(7))
+            lbl.setStyleSheet(f'color: {TXT2}; letter-spacing: 1px;')
             hdr.addWidget(dot)
-            hdr.addSpacing(4)
-            hdr.addWidget(_label(title, sans(8), TXT2, letter_spacing='1px'))
+            hdr.addWidget(lbl)
             hdr.addStretch()
-            l.addLayout(hdr)
-
             val_row = QHBoxLayout()
-            val_lbl = QLabel('—')
-            val_lbl.setFont(mono(font_size, bold=True))
-            val_lbl.setStyleSheet(f'color: {WHITE};')
-            val_row.addWidget(val_lbl)
+            val_row.setSpacing(5)
+            val = QLabel('—')
+            val.setFont(mono(fsize, bold=True))
+            val.setStyleSheet(f'color: {WHITE};')
+            val_row.addWidget(val)
             if unit:
-                val_row.addWidget(_label(unit, sans(9), TXT2))
+                u = QLabel(unit)
+                u.setFont(sans(9))
+                u.setStyleSheet(f'color: {TXT2};')
+                val_row.addWidget(u)
             val_row.addStretch()
-            l.addLayout(val_row)
+            row.addLayout(hdr)
+            row.addLayout(val_row)
+            setattr(self, attr, val)
+            return row
 
-            setattr(self, attr, val_lbl)
-            return f
+        info_vbox.addLayout(_stat(C_RPM,  'FUEL',      '_fuel_lbl',     24, 'L'))
+        info_vbox.addLayout(_stat(C_GEAR, 'POSITION',  '_position_lbl', 24))
+        info_vbox.addLayout(_stat(C_REF,  'LAST LAP',  '_laptime_lbl',  16))
+        info_vbox.addStretch()
 
-        info_strip.addWidget(_info_card(C_RPM,  'FUEL',      '_fuel_lbl',     22, 'L'))
-        info_strip.addWidget(_info_card(C_GEAR,  'POSITION',  '_position_lbl', 22))
-        info_strip.addWidget(_info_card(C_REF,   'LAST LAP',  '_laptime_lbl',  18))
-        row3.addLayout(info_strip, stretch=1)
+        inner.addWidget(info_widget)
+        cluster_vbox.addLayout(inner, stretch=1)
+        main.addWidget(cluster)
 
-        main.addLayout(row3)
-
-        outer.addWidget(instruments, stretch=1)
-        outer.addWidget(self.lap_history, stretch=0)
+        # ══════════════════════════════════════════════════════════════════
+        # ROW 2 — Session laps
+        # ══════════════════════════════════════════════════════════════════
+        self.lap_history = LapHistoryPanel()
+        main.addWidget(self.lap_history, stretch=1)
 
         return tab
 
