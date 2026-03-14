@@ -334,6 +334,12 @@ class ACUDPReader(TelemetryReader):
                 'current_time': elapsed_ms,
                 'world_x': world_x,
                 'world_z': world_z,
+                'tyre_temp':     [0.0, 0.0, 0.0, 0.0],
+                'tyre_pressure': [0.0, 0.0, 0.0, 0.0],
+                'brake_temp':    [0.0, 0.0, 0.0, 0.0],
+                'tyre_compound': '',
+                'air_temp':  0.0,
+                'road_temp': 0.0,
             }
         except Exception:
             return None
@@ -395,6 +401,27 @@ class ACCReader(TelemetryReader):
                 'world_x': sm.Graphics.car_coordinates[0].x,
                 'world_z': sm.Graphics.car_coordinates[0].z,
                 'lap_valid': sm.Graphics.is_valid_lap,
+                'tyre_temp': [
+                    sm.Physics.tyre_core_temp.front_left,
+                    sm.Physics.tyre_core_temp.front_right,
+                    sm.Physics.tyre_core_temp.rear_left,
+                    sm.Physics.tyre_core_temp.rear_right,
+                ],
+                'tyre_pressure': [
+                    sm.Physics.wheel_pressure.front_left,
+                    sm.Physics.wheel_pressure.front_right,
+                    sm.Physics.wheel_pressure.rear_left,
+                    sm.Physics.wheel_pressure.rear_right,
+                ],
+                'brake_temp': [
+                    sm.Physics.brake_temp.front_left,
+                    sm.Physics.brake_temp.front_right,
+                    sm.Physics.brake_temp.rear_left,
+                    sm.Physics.brake_temp.rear_right,
+                ],
+                'tyre_compound': sm.Graphics.tyre_compound,
+                'air_temp':  sm.Physics.air_temp,
+                'road_temp': sm.Physics.road_temp,
             }
         except Exception as e:
             print(f"ACC read error: {e}")
@@ -514,10 +541,38 @@ class IRacingReader(TelemetryReader):
                 'lap_dist_pct': lap_pct,
                 'world_x':      world_x,
                 'world_z':      world_z,
+                'tyre_temp':     self._ir_tyre_temps(),
+                'tyre_pressure': self._ir_tyre_pressures(),
+                'brake_temp':    [0.0, 0.0, 0.0, 0.0],
+                'tyre_compound': '',
+                'air_temp':  float(self.ir.get('AirTemp') or 0.0),
+                'road_temp': float(self.ir.get('TrackTemp') or 0.0),
             }
         except Exception as e:
             print(f"iRacing read error: {e}")
             return None
+
+    def _ir_tyre_temps(self):
+        """Return [FL, FR, RL, RR] tyre centre temps in °C, or zeros."""
+        try:
+            fl = float(self.ir.get('LFtempCM') or 0.0)
+            fr = float(self.ir.get('RFtempCM') or 0.0)
+            rl = float(self.ir.get('LRtempCM') or 0.0)
+            rr = float(self.ir.get('RRtempCM') or 0.0)
+            return [fl, fr, rl, rr]
+        except Exception:
+            return [0.0, 0.0, 0.0, 0.0]
+
+    def _ir_tyre_pressures(self):
+        """Return [FL, FR, RL, RR] tyre pressures in PSI, or zeros."""
+        try:
+            fl = float(self.ir.get('LFpressure') or 0.0)
+            fr = float(self.ir.get('RFpressure') or 0.0)
+            rl = float(self.ir.get('LRpressure') or 0.0)
+            rr = float(self.ir.get('RRpressure') or 0.0)
+            return [fl, fr, rl, rr]
+        except Exception:
+            return [0.0, 0.0, 0.0, 0.0]
 
     def is_connected(self):
         if not self.available or self.ir is None:
@@ -944,6 +999,207 @@ class SteeringBar(QWidget):
         painter.setPen(QColor(TXT2))
         lbl = f'{deg:+.1f}°'
         painter.drawText(QRectF(0, 0, w, h), Qt.AlignmentFlag.AlignCenter, lbl)
+
+        painter.end()
+
+
+# ---------------------------------------------------------------------------
+# TYRE CARD WIDGET
+# ---------------------------------------------------------------------------
+
+def _lerp_color(keypoints: list, value: float) -> QColor:
+    """Linear-interpolate between (value, '#rrggbb') keypoints."""
+    if value <= keypoints[0][0]:
+        c = keypoints[0][1]
+    elif value >= keypoints[-1][0]:
+        c = keypoints[-1][1]
+    else:
+        c = keypoints[-1][1]
+        for i in range(len(keypoints) - 1):
+            v0, c0 = keypoints[i]
+            v1, c1 = keypoints[i + 1]
+            if v0 <= value <= v1:
+                t = (value - v0) / (v1 - v0)
+                r = int(int(c0[1:3], 16) + t * (int(c1[1:3], 16) - int(c0[1:3], 16)))
+                g = int(int(c0[3:5], 16) + t * (int(c1[3:5], 16) - int(c0[3:5], 16)))
+                b = int(int(c0[5:7], 16) + t * (int(c1[5:7], 16) - int(c0[5:7], 16)))
+                return QColor(r, g, b)
+    return QColor(int(c[1:3], 16), int(c[3:5], 16), int(c[5:7], 16))
+
+
+_TYRE_TEMP_KP = [
+    (0,   '#1e3a5f'),   # no data / frozen
+    (40,  '#1d4ed8'),   # very cold
+    (70,  '#38bdf8'),   # building
+    (85,  '#22c55e'),   # optimal low
+    (105, '#22c55e'),   # optimal high
+    (120, '#f59e0b'),   # hot
+    (140, '#ef4444'),   # overheating
+]
+
+_BRAKE_TEMP_KP = [
+    (0,   '#374151'),
+    (150, '#ca8a04'),
+    (400, '#f97316'),
+    (750, '#ef4444'),
+    (1000,'#7f1d1d'),
+]
+
+
+class TyreCard(QWidget):
+    """Single-tyre temperature + pressure + brake temp display."""
+
+    _STATUS = [
+        (40,  'FROZEN',   '#60a5fa'),
+        (70,  'COLD',     '#38bdf8'),
+        (85,  'BUILDING', '#a3e635'),
+        (105, 'OPTIMAL',  '#22c55e'),
+        (120, 'HOT',      '#f59e0b'),
+        (9999,'OVERHEAT', '#ef4444'),
+    ]
+
+    def __init__(self, position: str, parent=None):
+        super().__init__(parent)
+        self.position = position   # 'FL', 'FR', 'RL', 'RR'
+        self.temp     = 0.0
+        self.pressure = 0.0
+        self.brake_t  = 0.0
+        self.setMinimumSize(180, 210)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+    def update_data(self, temp: float, pressure: float, brake_t: float):
+        self.temp     = temp
+        self.pressure = pressure
+        self.brake_t  = brake_t
+        self.update()
+
+    def status(self) -> tuple:
+        for thresh, label, color in self._STATUS:
+            if self.temp <= thresh:
+                return label, color
+        return 'OVERHEAT', '#ef4444'
+
+    @staticmethod
+    def status_for(temp: float) -> tuple:
+        for thresh, label, color in TyreCard._STATUS:
+            if temp <= thresh:
+                return label, color
+        return 'OVERHEAT', '#ef4444'
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+
+        temp_col  = _lerp_color(_TYRE_TEMP_KP,  self.temp)
+        brake_col = _lerp_color(_BRAKE_TEMP_KP, self.brake_t)
+        status_txt, status_hex = self.status()
+        status_col = QColor(status_hex)
+        has_data   = self.temp > 0.5
+
+        MARGIN  = 14
+        HDR_H   = 26
+        FOOT_H  = 60
+        tyre_y  = HDR_H
+        tyre_h  = h - HDR_H - FOOT_H
+        tyre_rect = QRectF(MARGIN, tyre_y, w - 2 * MARGIN, tyre_h)
+
+        # Background
+        painter.fillRect(0, 0, w, h, QColor(BG2))
+
+        # Subtle temperature glow across whole card
+        glow = QColor(temp_col) if has_data else QColor(BG3)
+        glow.setAlpha(18)
+        painter.fillRect(0, 0, w, h, glow)
+
+        # ── Tyre body ─────────────────────────────────────────────────
+        body_fill = QColor(temp_col) if has_data else QColor(BG3)
+        body_fill.setAlpha(40)
+        painter.setBrush(QBrush(body_fill))
+        border_col = QColor(temp_col) if has_data else QColor(BORDER)
+        painter.setPen(QPen(border_col, 2))
+        painter.drawRoundedRect(tyre_rect, 10, 10)
+
+        # ── Temperature number ─────────────────────────────────────────
+        if has_data:
+            painter.setFont(mono(30, bold=True))
+            painter.setPen(temp_col)
+            num_rect = QRectF(tyre_rect.x(), tyre_rect.y() + 10,
+                              tyre_rect.width(), tyre_rect.height() * 0.60)
+            painter.drawText(num_rect, Qt.AlignmentFlag.AlignCenter,
+                             f'{self.temp:.0f}')
+            painter.setFont(sans(9))
+            painter.setPen(QColor(TXT2))
+            unit_rect = QRectF(tyre_rect.x(),
+                               tyre_rect.y() + tyre_rect.height() * 0.62,
+                               tyre_rect.width(), 20)
+            painter.drawText(unit_rect, Qt.AlignmentFlag.AlignCenter, '°C')
+        else:
+            painter.setFont(mono(18))
+            painter.setPen(QColor(TXT2))
+            painter.drawText(tyre_rect, Qt.AlignmentFlag.AlignCenter, 'NO DATA')
+
+        # ── Header: position + status badge ───────────────────────────
+        painter.setFont(sans(8))
+        painter.setPen(QColor(TXT2))
+        painter.drawText(QRectF(MARGIN, 4, 40, HDR_H - 4),
+                         Qt.AlignmentFlag.AlignVCenter, self.position)
+
+        if has_data:
+            badge_w, badge_h_px = 68, 17
+            badge_rect = QRectF(w - badge_w - MARGIN, 5, badge_w, badge_h_px)
+            bg = QColor(status_col)
+            bg.setAlpha(35)
+            painter.setBrush(QBrush(bg))
+            painter.setPen(QPen(status_col, 1))
+            painter.drawRoundedRect(badge_rect, 4, 4)
+            painter.setFont(sans(6))
+            painter.setPen(status_col)
+            painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, status_txt)
+
+        # ── Footer: pressure + brake temp ─────────────────────────────
+        foot_y = float(h - FOOT_H)
+
+        # Divider
+        painter.setPen(QPen(QColor(BORDER), 1))
+        painter.drawLine(MARGIN, int(foot_y), w - MARGIN, int(foot_y))
+
+        # Pressure row
+        p_y = foot_y + 6
+        painter.setFont(sans(7))
+        painter.setPen(QColor(TXT2))
+        painter.drawText(QRectF(MARGIN, p_y, 32, 18),
+                         Qt.AlignmentFlag.AlignVCenter, 'PSI')
+        painter.setFont(mono(11, bold=True))
+        painter.setPen(QColor(WHITE))
+        pres_txt = f'{self.pressure:.1f}' if self.pressure > 0 else '—'
+        painter.drawText(QRectF(MARGIN + 30, p_y, w - MARGIN * 2 - 30, 18),
+                         Qt.AlignmentFlag.AlignVCenter, pres_txt)
+
+        # Brake temp bar
+        bar_y   = foot_y + 28
+        bar_w   = float(w - 2 * MARGIN)
+        bar_h_px = 8
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor(BG3)))
+        painter.drawRoundedRect(QRectF(MARGIN, bar_y, bar_w, bar_h_px), 3, 3)
+
+        ratio = min(1.0, self.brake_t / 1000.0)
+        if ratio > 0:
+            painter.setBrush(QBrush(brake_col))
+            painter.drawRoundedRect(QRectF(MARGIN, bar_y, bar_w * ratio, bar_h_px), 3, 3)
+
+        lbl_y = bar_y + bar_h_px + 3
+        painter.setFont(sans(6))
+        painter.setPen(QColor(TXT2))
+        painter.drawText(QRectF(MARGIN, lbl_y, 36, 14),
+                         Qt.AlignmentFlag.AlignVCenter, 'BRAKE')
+        painter.setFont(mono(7))
+        painter.setPen(brake_col if self.brake_t > 0 else QColor(TXT2))
+        brk_txt = f'{self.brake_t:.0f}°C' if self.brake_t > 0 else '—'
+        painter.drawText(QRectF(MARGIN + 38, lbl_y, bar_w - 38, 14),
+                         Qt.AlignmentFlag.AlignVCenter, brk_txt)
 
         painter.end()
 
@@ -1958,6 +2214,7 @@ class TelemetryApp(QMainWindow):
         self.tabs.addTab(self._build_dashboard_tab(), 'DASHBOARD')
         self.tabs.addTab(self._build_graphs_tab(), 'TELEMETRY GRAPHS')
         self.tabs.addTab(self._build_analysis_tab(), 'LAP ANALYSIS')
+        self.tabs.addTab(self._build_tyres_tab(), 'TYRES')
 
         self._set_graph_title_suffix('Lap 1')
 
@@ -2489,6 +2746,160 @@ class TelemetryApp(QMainWindow):
         _ = suffix  # acknowledged, intentionally unused here
 
     # ------------------------------------------------------------------
+    # TYRES TAB
+    # ------------------------------------------------------------------
+
+    def _build_tyres_tab(self) -> QWidget:
+        tab = QWidget()
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(10, 10, 10, 10)
+        outer.setSpacing(8)
+
+        # ── Info strip ────────────────────────────────────────────────
+        info_card = QFrame()
+        info_card.setStyleSheet(
+            f'background: {BG2}; border: 1px solid {BORDER}; border-radius: 6px;')
+        info_row = QHBoxLayout(info_card)
+        info_row.setContentsMargins(16, 8, 16, 8)
+        info_row.setSpacing(0)
+
+        def _stat_chip(title, attr):
+            col = QHBoxLayout()
+            col.setSpacing(8)
+            lbl = QLabel(title)
+            lbl.setFont(sans(7))
+            lbl.setStyleSheet(f'color: {TXT2}; letter-spacing: 1px;')
+            val = QLabel('—')
+            val.setFont(mono(10, bold=True))
+            val.setStyleSheet(f'color: {WHITE};')
+            setattr(self, attr, val)
+            col.addWidget(lbl)
+            col.addWidget(val)
+            return col
+
+        info_row.addLayout(_stat_chip('COMPOUND', '_tyre_compound_lbl'))
+        info_row.addSpacing(28)
+        info_row.addLayout(_stat_chip('AIR', '_air_temp_lbl'))
+        info_row.addSpacing(28)
+        info_row.addLayout(_stat_chip('TRACK', '_road_temp_lbl'))
+        info_row.addStretch()
+
+        # Right side: ACC-only note when not on ACC
+        note = QLabel('Full tyre data available on ACC only')
+        note.setFont(sans(7))
+        note.setStyleSheet(f'color: {TXT2};')
+        info_row.addWidget(note)
+
+        outer.addWidget(info_card)
+
+        # ── 2×2 tyre grid ─────────────────────────────────────────────
+        grid_widget = QWidget()
+        grid = QGridLayout(grid_widget)
+        grid.setSpacing(8)
+        grid.setContentsMargins(0, 0, 0, 0)
+
+        self._tyre_cards: list[TyreCard] = []
+        for pos, row, col in [('FL', 0, 0), ('FR', 0, 1),
+                               ('RL', 1, 0), ('RR', 1, 1)]:
+            card = TyreCard(pos)
+            grid.addWidget(card, row, col)
+            self._tyre_cards.append(card)
+
+        outer.addWidget(grid_widget, stretch=1)
+
+        # ── Insights panel ────────────────────────────────────────────
+        insights_card = QFrame()
+        insights_card.setStyleSheet(
+            f'background: {BG2}; border: 1px solid {BORDER}; border-radius: 6px;')
+        ins_layout = QHBoxLayout(insights_card)
+        ins_layout.setContentsMargins(16, 10, 16, 10)
+
+        ins_icon = QLabel('◈')
+        ins_icon.setFont(sans(10))
+        ins_icon.setStyleSheet(f'color: {TXT2};')
+        ins_layout.addWidget(ins_icon)
+        ins_layout.addSpacing(8)
+
+        self._insights_lbl = QLabel('Connect to a game to see tyre insights.')
+        self._insights_lbl.setFont(sans(9))
+        self._insights_lbl.setStyleSheet(f'color: {TXT2};')
+        self._insights_lbl.setWordWrap(True)
+        ins_layout.addWidget(self._insights_lbl, stretch=1)
+
+        outer.addWidget(insights_card)
+
+        return tab
+
+    def _update_tyre_insights(self, temps: list, pressures: list,
+                              road_temp: float):
+        """Analyse the current tyre state and write a one-line insights string."""
+        if not any(t > 0.5 for t in temps):
+            self._insights_lbl.setText('Waiting for data…')
+            self._insights_lbl.setStyleSheet(f'color: {TXT2};')
+            return
+
+        fl, fr, rl, rr = temps
+        parts: list[str] = []
+        warn = False
+
+        # Left-right imbalance
+        front_diff = fl - fr
+        rear_diff  = rl - rr
+        if abs(front_diff) > 6:
+            side = 'FL' if front_diff > 0 else 'FR'
+            parts.append(f'Front imbalance {abs(front_diff):.0f}°C ({side} hotter)')
+            warn = True
+        if abs(rear_diff) > 6:
+            side = 'RL' if rear_diff > 0 else 'RR'
+            parts.append(f'Rear imbalance {abs(rear_diff):.0f}°C ({side} hotter)')
+            warn = True
+
+        # Front-rear bias
+        front_avg = (fl + fr) / 2
+        rear_avg  = (rl + rr) / 2
+        fr_bias   = front_avg - rear_avg
+        if abs(fr_bias) > 10:
+            parts.append(
+                f'{"Front" if fr_bias > 0 else "Rear"} tyres '
+                f'{abs(fr_bias):.0f}°C hotter than '
+                f'{"rear" if fr_bias > 0 else "front"}')
+
+        # Per-tyre status summary
+        statuses = [TyreCard.status_for(t)[0] for t in temps]
+        labels   = ['FL', 'FR', 'RL', 'RR']
+        cold_tyres = [labels[i] for i, s in enumerate(statuses)
+                      if s in ('COLD', 'FROZEN', 'BUILDING')]
+        hot_tyres  = [labels[i] for i, s in enumerate(statuses)
+                      if s in ('HOT', 'OVERHEAT')]
+
+        if cold_tyres:
+            parts.append(f'{", ".join(cold_tyres)} still building heat')
+        if hot_tyres:
+            parts.append(f'{", ".join(hot_tyres)} above optimal — risk of graining')
+            warn = True
+
+        # Pressure imbalance
+        if all(p > 5 for p in pressures):
+            lo, hi = min(pressures), max(pressures)
+            if hi - lo > 1.5:
+                parts.append(f'Pressure spread {lo:.1f}–{hi:.1f} PSI')
+
+        # Road-temp context
+        if road_temp > 45:
+            parts.append(f'High track temp ({road_temp:.0f}°C) — tyres heat faster')
+        elif road_temp > 0 and road_temp < 20:
+            parts.append(f'Cold track ({road_temp:.0f}°C) — allow longer warm-up')
+
+        if not parts:
+            text = 'All tyres within optimal temperature window.'
+        else:
+            text = '  ·  '.join(parts)
+
+        color = C_BRAKE if warn else C_THROTTLE
+        self._insights_lbl.setText(text)
+        self._insights_lbl.setStyleSheet(f'color: {color};')
+
+    # ------------------------------------------------------------------
     # GAME SELECTION / AUTO-DETECT
     # ------------------------------------------------------------------
 
@@ -2677,6 +3088,22 @@ class TelemetryApp(QMainWindow):
         self.car_label.setText(data['car_name'])
         self.track_label.setText(data['track_name'])
         self._auto_detect_track(data['track_name'])
+
+        # ── Tyres tab ─────────────────────────────────────────────────────
+        t_temps  = data.get('tyre_temp',     [0.0, 0.0, 0.0, 0.0])
+        t_pres   = data.get('tyre_pressure', [0.0, 0.0, 0.0, 0.0])
+        t_brake  = data.get('brake_temp',    [0.0, 0.0, 0.0, 0.0])
+        air_t    = data.get('air_temp',  0.0)
+        road_t   = data.get('road_temp', 0.0)
+        compound = data.get('tyre_compound', '')
+
+        for i, card in enumerate(self._tyre_cards):
+            card.update_data(t_temps[i], t_pres[i], t_brake[i])
+
+        self._tyre_compound_lbl.setText(compound or '—')
+        self._air_temp_lbl.setText(f'{air_t:.1f}°C' if air_t else '—')
+        self._road_temp_lbl.setText(f'{road_t:.1f}°C' if road_t else '—')
+        self._update_tyre_insights(t_temps, t_pres, road_t)
 
         fuel = data['fuel']
         self._fuel_lbl.setText(f"{fuel:.1f}")
@@ -2906,6 +3333,13 @@ class TelemetryApp(QMainWindow):
         self._fuel_lbl.setText('—')
         self._position_lbl.setText('—')
         self._laptime_lbl.setText('—')
+        for card in self._tyre_cards:
+            card.update_data(0.0, 0.0, 0.0)
+        self._tyre_compound_lbl.setText('—')
+        self._air_temp_lbl.setText('—')
+        self._road_temp_lbl.setText('—')
+        self._insights_lbl.setText('Connect to a game to see tyre insights.')
+        self._insights_lbl.setStyleSheet(f'color: {TXT2};')
         self._reset_analysis_graphs()
         self.track_map.reset()
 

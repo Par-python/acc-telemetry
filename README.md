@@ -123,8 +123,7 @@ The bar at the top of the window gives you control over everything:
 ## Planned Features
 
 - [ ] **Lap comparison overlay** — plot any two saved laps on the same graphs
-- [ ] **Best lap highlight** — automatically flag personal best laps in the session
-- [ ] **Tyre temperatures & wear** — from ACC shared memory
+- [x] **Tyre temperatures & wear** — core temp, pressure, brake temp per corner (ACC); tyre temp on iRacing
 - [ ] **Fuel strategy calculator** — target laps remaining based on current consumption
 - [ ] **Corner labels on track map** — auto-detected from curvature, manually editable in JSON
 - [ ] **Export to CSV** — dump full lap data for external analysis
