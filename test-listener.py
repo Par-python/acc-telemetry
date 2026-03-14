@@ -1399,10 +1399,54 @@ class TimeDeltaGraph(FigureCanvas):
 
 
 # ---------------------------------------------------------------------------
+# LAP DELTA HELPERS
+# ---------------------------------------------------------------------------
+
+def _interp_time_at_dist(dists: list, times: list, target: float) -> float | None:
+    """Return interpolated time_ms at target distance using binary search."""
+    if not dists or target < dists[0]:
+        return None
+    if target >= dists[-1]:
+        return float(times[-1])
+    lo, hi = 0, len(dists) - 1
+    while lo < hi - 1:
+        mid = (lo + hi) // 2
+        if dists[mid] <= target:
+            lo = mid
+        else:
+            hi = mid
+    span = dists[hi] - dists[lo]
+    if span == 0:
+        return float(times[lo])
+    t = (target - dists[lo]) / span
+    return times[lo] + t * (times[hi] - times[lo])
+
+
+def _compute_sector_times(dists: list, times: list,
+                          boundaries_m: list) -> list:
+    """Return list of per-sector durations (s) at each distance boundary.
+    Returns None for sectors not yet reached."""
+    if not dists or not times:
+        return [None] * len(boundaries_m)
+    result = []
+    prev_ms = 0.0
+    for b in boundaries_m:
+        t = _interp_time_at_dist(dists, times, b)
+        if t is not None:
+            result.append((t - prev_ms) / 1000.0)
+            prev_ms = t
+        else:
+            result.append(None)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # SECTOR TIMES PANEL
 # ---------------------------------------------------------------------------
 
 class SectorTimesPanel(QWidget):
+    SECTORS = ['S1', 'S2', 'S3']
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMaximumWidth(230)
@@ -1416,27 +1460,29 @@ class SectorTimesPanel(QWidget):
         laps_header.setStyleSheet(f'color: {TXT2}; letter-spacing: 1px;')
         layout.addWidget(laps_header)
 
-        self.lap1_label = QLabel('01:41.475')
-        self.lap1_label.setFont(mono(13, bold=True))
-        self.lap1_label.setStyleSheet(f'color: {C_REF};')
+        # Current lap (always counting up from 0:00.000)
+        self.lap_current_label = QLabel('0:00.000')
+        self.lap_current_label.setFont(mono(15, bold=True))
+        self.lap_current_label.setStyleSheet(f'color: {TXT};')
 
-        self.lap2_label = QLabel('01:41.510  +0.035s')
-        self.lap2_label.setFont(mono(11))
-        self.lap2_label.setStyleSheet(f'color: {C_DELTA};')
+        # Reference (last completed lap) — shown only when available
+        self.lap_ref_label = QLabel('—')
+        self.lap_ref_label.setFont(mono(10))
+        self.lap_ref_label.setStyleSheet(f'color: {TXT2};')
+
+        # Gap to reference at current position
+        self.lap_gap_label = QLabel('')
+        self.lap_gap_label.setFont(mono(10, bold=True))
+        self.lap_gap_label.setStyleSheet(f'color: {TXT2};')
 
         lap_card = QFrame()
-        lap_card.setStyleSheet(f'''
-            QFrame {{
-                background: {BG3};
-                border: 1px solid {BORDER};
-                border-radius: 4px;
-                padding: 6px;
-            }}
-        ''')
-        lap_card_layout = QVBoxLayout(lap_card)
-        lap_card_layout.setSpacing(4)
-        lap_card_layout.addWidget(self.lap1_label)
-        lap_card_layout.addWidget(self.lap2_label)
+        lap_card.setStyleSheet(f'background: {BG3}; border: 1px solid {BORDER};'
+                               f' border-radius: 4px; padding: 6px;')
+        lc = QVBoxLayout(lap_card)
+        lc.setSpacing(3)
+        lc.addWidget(self.lap_current_label)
+        lc.addWidget(self.lap_ref_label)
+        lc.addWidget(self.lap_gap_label)
         layout.addWidget(lap_card)
 
         layout.addWidget(h_line())
@@ -1448,75 +1494,105 @@ class SectorTimesPanel(QWidget):
 
         grid = QGridLayout()
         grid.setSpacing(4)
-
-        col_headers = ['SECTOR', 'LAP 1', 'Δ']
-        for col, txt in enumerate(col_headers):
+        for col, txt in enumerate(['', 'REF', 'CUR', 'Δ']):
             lbl = QLabel(txt)
             lbl.setFont(sans(8))
             lbl.setStyleSheet(f'color: {TXT2}; letter-spacing: 0.5px;')
             grid.addWidget(lbl, 0, col)
 
-        self.gap_labels = {}
-        self.sector_time_labels = {}
-        for row, s in enumerate(['S1', 'S2', 'S3', 'S4', 'S5'], 1):
+        self._sec_ref_labels:  dict[str, QLabel] = {}
+        self._sec_cur_labels:  dict[str, QLabel] = {}
+        self._sec_gap_labels:  dict[str, QLabel] = {}
+
+        for row, s in enumerate(self.SECTORS, 1):
             s_lbl = QLabel(s)
             s_lbl.setFont(mono(9, bold=True))
             s_lbl.setStyleSheet(f'color: {TXT2};')
             grid.addWidget(s_lbl, row, 0)
 
-            st_lbl = QLabel('20.706')
-            st_lbl.setFont(mono(10))
-            st_lbl.setStyleSheet(f'color: {TXT};')
-            self.sector_time_labels[s] = st_lbl
-            grid.addWidget(st_lbl, row, 1)
+            ref_lbl = QLabel('—')
+            ref_lbl.setFont(mono(9))
+            ref_lbl.setStyleSheet(f'color: {TXT2};')
+            self._sec_ref_labels[s] = ref_lbl
+            grid.addWidget(ref_lbl, row, 1)
 
-            gap_lbl = QLabel('--')
-            gap_lbl.setFont(mono(10, bold=True))
-            self.gap_labels[s] = gap_lbl
-            grid.addWidget(gap_lbl, row, 2)
+            cur_lbl = QLabel('—')
+            cur_lbl.setFont(mono(9))
+            cur_lbl.setStyleSheet(f'color: {TXT};')
+            self._sec_cur_labels[s] = cur_lbl
+            grid.addWidget(cur_lbl, row, 2)
+
+            gap_lbl = QLabel('')
+            gap_lbl.setFont(mono(9, bold=True))
+            self._sec_gap_labels[s] = gap_lbl
+            grid.addWidget(gap_lbl, row, 3)
 
         gaps_frame = QFrame()
-        gaps_frame.setStyleSheet(f'''
-            QFrame {{
-                background: {BG3};
-                border: 1px solid {BORDER};
-                border-radius: 4px;
-            }}
-        ''')
+        gaps_frame.setStyleSheet(f'background: {BG3}; border: 1px solid {BORDER};'
+                                 f' border-radius: 4px;')
         gaps_frame.setLayout(grid)
         layout.addWidget(gaps_frame)
         layout.addStretch()
 
-    def update_laps(self, lap1_time_s: float, lap2_time_s: float, gap_s: float):
-        def fmt(t):
-            m = int(t // 60)
-            s = t % 60
-            return f'{m:02d}:{s:06.3f}'
+    # ------------------------------------------------------------------ API
 
-        self.lap1_label.setText(fmt(lap1_time_s))
-        sign = '+' if gap_s >= 0 else ''
-        self.lap2_label.setText(f'{fmt(lap2_time_s)}  {sign}{gap_s:.3f}s')
-        self._update_gaps(lap1_time_s, lap2_time_s)
+    @staticmethod
+    def _fmt(t_s: float) -> str:
+        m = int(t_s // 60)
+        s = t_s % 60
+        return f'{m}:{s:06.3f}'
 
-    def _update_gaps(self, t1: float, t2: float):
-        base = t1 / 5
-        times = [base * 1.1, base * 0.9, base * 1.0, base * 1.05, base * 0.95]
-        deltas = [
-            (t2 - t1) * 0.20,
-            (t2 - t1) * 0.40,
-            (t2 - t1) * -0.30,
-            (t2 - t1) * 0.20,
-            (t2 - t1) * -0.20,
-        ]
-        for s, sec_t, delta in zip(['S1', 'S2', 'S3', 'S4', 'S5'], times, deltas):
-            self.sector_time_labels[s].setText(f'{sec_t:.3f}')
-            lbl = self.gap_labels[s]
-            sign = '+' if delta >= 0 else ''
-            lbl.setText(f'{sign}{delta:.3f}s')
-            if delta > 0:
-                lbl.setStyleSheet(f'color: {C_REF};')
+    def update_current_time(self, current_time_s: float):
+        """Update only the running lap timer (no reference available)."""
+        self.lap_current_label.setText(self._fmt(current_time_s))
+        self.lap_ref_label.setText('—')
+        self.lap_gap_label.setText('')
+
+    def update_laps(self, current_time_s: float, ref_time_s: float,
+                    ref_sectors: list, cur_sectors: list):
+        """Full update: running time, reference lap, and per-sector gaps."""
+        self.lap_current_label.setText(self._fmt(current_time_s))
+
+        self.lap_ref_label.setText(f'Ref  {self._fmt(ref_time_s)}')
+        self.lap_ref_label.setStyleSheet(f'color: {C_REF};')
+
+        # Running gap to reference at current position (last available delta)
+        if cur_sectors and ref_sectors:
+            cur_total = sum(s for s in cur_sectors if s is not None)
+            ref_total = sum(s for s in ref_sectors[:len(cur_sectors)]
+                            if s is not None)
+            if cur_total > 0 and ref_total > 0:
+                gap = cur_total - ref_total
+                sign = '+' if gap >= 0 else ''
+                col  = C_REF if gap > 0 else C_THROTTLE
+                self.lap_gap_label.setText(f'{sign}{gap:.3f}s')
+                self.lap_gap_label.setStyleSheet(f'color: {col};')
             else:
-                lbl.setStyleSheet(f'color: {C_THROTTLE};')
+                self.lap_gap_label.setText('')
+        else:
+            self.lap_gap_label.setText('')
+
+        for s, ref_s, cur_s in zip(self.SECTORS, ref_sectors, cur_sectors):
+            if ref_s is not None:
+                self._sec_ref_labels[s].setText(f'{ref_s:.3f}')
+                self._sec_ref_labels[s].setStyleSheet(f'color: {TXT2};')
+            else:
+                self._sec_ref_labels[s].setText('—')
+
+            if cur_s is not None:
+                self._sec_cur_labels[s].setText(f'{cur_s:.3f}')
+                self._sec_cur_labels[s].setStyleSheet(f'color: {TXT};')
+                if ref_s is not None:
+                    delta = cur_s - ref_s
+                    sign  = '+' if delta >= 0 else ''
+                    col   = C_REF if delta > 0 else C_THROTTLE
+                    self._sec_gap_labels[s].setText(f'{sign}{delta:.3f}s')
+                    self._sec_gap_labels[s].setStyleSheet(f'color: {col};')
+                else:
+                    self._sec_gap_labels[s].setText('')
+            else:
+                self._sec_cur_labels[s].setText('—')
+                self._sec_gap_labels[s].setText('')
 
 
 # ---------------------------------------------------------------------------
@@ -1562,6 +1638,12 @@ class TelemetryApp(QMainWindow):
 
         # Track recorder
         self.recorder = TrackRecorder()
+
+        # Reference lap for delta / sector comparison (last completed lap)
+        self._ref_lap_dists: list[float] = []
+        self._ref_lap_times: list[float] = []
+        self._ref_lap_time_s: float = 0.0
+        self._current_deltas: list[float] = []
 
         self._init_ui()
 
@@ -2008,6 +2090,7 @@ class TelemetryApp(QMainWindow):
     def _reset_current_lap_data(self):
         self.current_lap_data = {
             'time_ms': [],
+            'dist_m':  [],
             'speed': [],
             'throttle': [],
             'brake': [],
@@ -2017,6 +2100,7 @@ class TelemetryApp(QMainWindow):
             'abs': [],
             'tc': [],
         }
+        self._current_deltas = []
 
     def _store_completed_lap(self):
         if self.current_lap_data.get('speed'):
@@ -2024,6 +2108,13 @@ class TelemetryApp(QMainWindow):
                 'lap_number': self.current_lap_count,
                 'data': {k: list(v) for k, v in self.current_lap_data.items()},
             })
+            # Promote this lap to the reference for delta / sector comparison
+            dists = self.current_lap_data.get('dist_m', [])
+            times = self.current_lap_data.get('time_ms', [])
+            if dists and times and len(dists) == len(times):
+                self._ref_lap_dists = list(dists)
+                self._ref_lap_times = list(times)
+                self._ref_lap_time_s = times[-1] / 1000.0
 
     def _set_graph_title_suffix(self, suffix: str):
         # Lap info is shown in the connection strip header label.
@@ -2266,24 +2357,15 @@ class TelemetryApp(QMainWindow):
             )
             self.rec_label.setText(f'{self.recorder.sample_count} pts')
 
-        ref_lap_s = 101.475
-        gap_s = 0.035 + 0.02 * math.sin(time.time() * 0.5)
-        self.sector_panel.update_laps(ref_lap_s, ref_lap_s + gap_s, gap_s)
-
         self.ana_speed.update_data(distance_m, data['speed'])
         self.ana_throttle_brake.update_data(distance_m, data['throttle'], data['brake'])
         self.ana_gear.update_data(distance_m, gear_int)
         self.ana_rpm.update_data(distance_m, rpm)
         self.ana_steer.update_data(distance_m, steer_deg)
 
-        n = len(self.current_lap_data.get('time_ms', []))
-        dists = [(self.current_lap_data['time_ms'][i] / lap_dur_ms) * _track_length_m
-                 for i in range(n)] if n else []
-        deltas = [0.1 * math.sin(d / 500) for d in dists] if dists else []
-        self.time_delta_graph.update_data(dists, deltas, distance_m)
-
         # ── Store raw lap data ───────────────────────────────────────────
         self.current_lap_data['time_ms'].append(current_time)
+        self.current_lap_data['dist_m'].append(distance_m)
         self.current_lap_data['speed'].append(data['speed'])
         self.current_lap_data['throttle'].append(data['throttle'])
         self.current_lap_data['brake'].append(data['brake'])
@@ -2292,6 +2374,34 @@ class TelemetryApp(QMainWindow):
         self.current_lap_data['gear'].append(gear_int)
         self.current_lap_data['abs'].append(data['abs'])
         self.current_lap_data['tc'].append(data['tc'])
+
+        # ── Delta vs reference lap ────────────────────────────────────────
+        if self._ref_lap_dists:
+            ref_t = _interp_time_at_dist(self._ref_lap_dists, self._ref_lap_times,
+                                         distance_m)
+            if ref_t is not None:
+                self._current_deltas.append((current_time - ref_t) / 1000.0)
+            n_d = min(len(self.current_lap_data['dist_m']), len(self._current_deltas))
+            self.time_delta_graph.update_data(
+                self.current_lap_data['dist_m'][:n_d],
+                self._current_deltas[:n_d],
+                distance_m)
+        else:
+            self.time_delta_graph.update_data([], [], distance_m)
+
+        # ── Sector panel ─────────────────────────────────────────────────
+        current_time_s = current_time / 1000.0
+        if self._ref_lap_time_s > 0:
+            boundaries = [_track_length_m * f for f in (1/3, 2/3, 1.0)]
+            ref_secs = _compute_sector_times(
+                self._ref_lap_dists, self._ref_lap_times, boundaries)
+            cur_secs = _compute_sector_times(
+                self.current_lap_data['dist_m'],
+                self.current_lap_data['time_ms'], boundaries)
+            self.sector_panel.update_laps(current_time_s, self._ref_lap_time_s,
+                                          ref_secs, cur_secs)
+        else:
+            self.sector_panel.update_current_time(current_time_s)
 
     # ------------------------------------------------------------------
     # GRAPH RESET
