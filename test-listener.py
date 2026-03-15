@@ -1562,20 +1562,22 @@ def _style_ax(ax, fig, ylabel: str = '', ylim=None):
     ax.tick_params(colors=TXT2, labelsize=7, length=3)
     ax.grid(True, color='#1c1c1c', linewidth=0.8, linestyle='-', axis='y')
     if ylabel:
-        ax.set_ylabel(ylabel, color=TXT2, fontsize=8)
+        ax.set_ylabel(ylabel, color=TXT2, fontsize=8, labelpad=4)
     if ylim:
         ax.set_ylim(ylim)
-    fig.tight_layout(pad=0.4)
+    # Explicit margins so y-axis labels (left) and x-axis ticks (bottom) are never clipped
+    fig.subplots_adjust(left=0.09, right=0.98, top=0.95, bottom=0.22)
 
 
 class ChannelGraph(FigureCanvas):
     """Single-channel live telemetry graph."""
 
     def __init__(self, color: str, ylabel: str, ylim=(0, 100), parent=None):
-        self.fig = Figure(figsize=(8, 1.8), facecolor=BG)
+        self.fig = Figure(figsize=(8, 2.2), facecolor=BG)
         super().__init__(self.fig)
         self.ax = self.fig.add_subplot(111)
         _style_ax(self.ax, self.fig, ylabel=ylabel, ylim=ylim)
+        self.setMinimumHeight(160)
         self.data = []
         self.line, = self.ax.plot([], [], color=color, linewidth=1.4)
 
@@ -1598,10 +1600,11 @@ class MultiChannelGraph(FigureCanvas):
 
     def __init__(self, color1: str, color2: str, ylabel: str,
                  label1: str, label2: str, ylim=(0, 100), parent=None):
-        self.fig = Figure(figsize=(8, 1.8), facecolor=BG)
+        self.fig = Figure(figsize=(8, 2.2), facecolor=BG)
         super().__init__(self.fig)
         self.ax = self.fig.add_subplot(111)
         _style_ax(self.ax, self.fig, ylabel=ylabel, ylim=ylim)
+        self.setMinimumHeight(160)
         self.data1, self.data2 = [], []
         self.line1, = self.ax.plot([], [], color=color1, linewidth=1.4, label=label1)
         self.line2, = self.ax.plot([], [], color=color2, linewidth=1.4, label=label2)
@@ -2595,8 +2598,8 @@ class TelemetryApp(QMainWindow):
         container = QWidget()
         container.setStyleSheet(f'background: {BG};')
         vbox = QVBoxLayout(container)
-        vbox.setContentsMargins(4, 4, 4, 4)
-        vbox.setSpacing(2)
+        vbox.setContentsMargins(4, 8, 4, 8)
+        vbox.setSpacing(10)
         scroll.setWidget(container)
         outer.addWidget(scroll)
 
