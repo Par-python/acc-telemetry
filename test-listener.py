@@ -1262,6 +1262,9 @@ class TrackMapWidget(QWidget):
         # Smooth car position (lerped toward car_progress each animation tick)
         self._car_smooth: float = 0.0
 
+        # When True, feed_world_pos is a no-op (user has locked the recorded shape)
+        self._shape_locked: bool = False
+
     # ------------------------------------------------------------------ API
 
     def set_track(self, key: str):
@@ -1299,6 +1302,8 @@ class TrackMapWidget(QWidget):
 
     def feed_world_pos(self, pct: float, world_x: float, world_z: float):
         """Add a live world-coord sample. Rebuilds the display when new ground is covered."""
+        if self._shape_locked:
+            return
         if world_x == 0.0 and world_z == 0.0:
             return
         bucket     = int(pct * N_TRACK_SEG) % N_TRACK_SEG
@@ -2323,6 +2328,9 @@ class TelemetryApp(QMainWindow):
         self._current_lap_had_pit_exit: bool = True   # first lap is always an outlap
         self._prev_is_in_pit_lane: bool = True
 
+        # Validity latch: once False this lap it stays False until next lap starts
+        self._current_lap_valid: bool = True
+
         # Tyre stint age (laps on current set, reset at each pit exit)
         self._tyre_stint_laps: int = 0
 
@@ -2842,10 +2850,26 @@ class TelemetryApp(QMainWindow):
         self.sector_panel = SectorTimesPanel()
         splitter.addWidget(self.sector_panel)
 
-        # Center: track map
+        # Center: track map + lock button
+        map_container = QWidget()
+        map_container.setStyleSheet(f'background: {BG};')
+        map_vbox = QVBoxLayout(map_container)
+        map_vbox.setContentsMargins(0, 0, 0, 4)
+        map_vbox.setSpacing(4)
         self.track_map = TrackMapWidget()
         self.track_map.setMinimumWidth(300)
-        splitter.addWidget(self.track_map)
+        map_vbox.addWidget(self.track_map, stretch=1)
+        self._track_lock_btn = QPushButton('LOCK SHAPE')
+        self._track_lock_btn.setFont(mono(9, bold=True))
+        self._track_lock_btn.setCheckable(True)
+        self._track_lock_btn.setStyleSheet(
+            f'QPushButton {{background:{BG3};color:{WHITE};border:1px solid {BORDER};'
+            f'border-radius:4px;padding:4px 12px;}}'
+            f'QPushButton:checked {{background:#b45309;color:#fff;border-color:#d97706;}}'
+        )
+        self._track_lock_btn.toggled.connect(self._on_track_lock_toggled)
+        map_vbox.addWidget(self._track_lock_btn)
+        splitter.addWidget(map_container)
 
         # Right: analysis telemetry graphs in a scroll area
         right_container = QWidget()
@@ -3982,6 +4006,10 @@ class TelemetryApp(QMainWindow):
     # TRACK RECORDING
     # ------------------------------------------------------------------
 
+    def _on_track_lock_toggled(self, checked: bool):
+        self.track_map._shape_locked = checked
+        self._track_lock_btn.setText('UNLOCK SHAPE' if checked else 'LOCK SHAPE')
+
     def _on_rec_toggled(self, checked: bool):
         if checked:
             self.recorder.start()
@@ -4053,6 +4081,10 @@ class TelemetryApp(QMainWindow):
             self._tyre_stint_laps = 0
         self._prev_is_in_pit_lane = cur_in_pit_lane
 
+        # Validity latch: once the lap is invalid it stays invalid until next lap
+        if not data.get('lap_valid', True):
+            self._current_lap_valid = False
+
         if lap_changed:
             _fuel_now = data.get('fuel', 0.0)
             if self._fuel_at_lap_start is not None and 0 < _fuel_now < self._fuel_at_lap_start:
@@ -4060,6 +4092,7 @@ class TelemetryApp(QMainWindow):
             self._fuel_at_lap_start = _fuel_now
             self._store_completed_lap()
             self._current_lap_had_pit_exit = False  # reset for new lap
+            self._current_lap_valid = True           # reset validity for new lap
             self._tyre_stint_laps += 1
             self._reset_graphs()
             self._reset_analysis_graphs()
@@ -4185,9 +4218,9 @@ class TelemetryApp(QMainWindow):
         self.track_map.update_telemetry(lap_progress, data['throttle'], data['brake'])
         # Only accumulate track shape after the outlap and during valid laps.
         # current_lap_count >= 1 skips the outlap from pits.
-        # lap_valid (ACC-native flag, defaults True for other sims) prevents
-        # off-track excursions from corrupting the recorded shape.
-        if self.current_lap_count >= 1 and data.get('lap_valid', True):
+        # _current_lap_valid latches to False the moment ACC marks the lap
+        # invalid (off-track / track limits) and stays False until next lap.
+        if self.current_lap_count >= 1 and self._current_lap_valid:
             self.track_map.feed_world_pos(
                 lap_progress,
                 data.get('world_x', 0.0),
