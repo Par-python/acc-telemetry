@@ -401,6 +401,7 @@ class ACCReader(TelemetryReader):
                 'world_x': sm.Graphics.car_coordinates[0].x,
                 'world_z': sm.Graphics.car_coordinates[0].z,
                 'lap_valid': sm.Graphics.is_valid_lap,
+                'is_in_pit_lane': sm.Graphics.is_in_pit_lane,
                 'tyre_temp': [
                     sm.Physics.tyre_core_temp.front_left,
                     sm.Physics.tyre_core_temp.front_right,
@@ -2312,6 +2313,10 @@ class TelemetryApp(QMainWindow):
         self._fuel_at_lap_start: float | None = None
         self._fuel_per_lap_history: list[float] = []
 
+        # Outlap detection: True when car exits pit lane during current lap
+        self._current_lap_had_pit_exit: bool = True   # first lap is always an outlap
+        self._prev_is_in_pit_lane: bool = True
+
         # Track selection (None = auto-detect from telemetry data)
         self._active_track_key: str | None = None
         self._auto_track = True
@@ -2914,6 +2919,8 @@ class TelemetryApp(QMainWindow):
         self._current_deltas = []
 
     def _store_completed_lap(self):
+        if self._current_lap_had_pit_exit:
+            return  # outlap — car exited pit lane this lap, don't record
         if self.current_lap_data.get('speed'):
             dists = self.current_lap_data.get('dist_m', [])
             times = self.current_lap_data.get('time_ms', [])
@@ -3413,12 +3420,6 @@ class TelemetryApp(QMainWindow):
         self._sess_rows_layout.setSpacing(3)
         self._sess_rows_layout.addStretch()
 
-        self._sess_empty_lbl = QLabel('No completed laps yet.')
-        self._sess_empty_lbl.setFont(sans(10))
-        self._sess_empty_lbl.setStyleSheet(f'color: {TXT2};')
-        self._sess_empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._sess_rows_layout.insertWidget(0, self._sess_empty_lbl)
-
         sess_scroll = QScrollArea()
         sess_scroll.setWidgetResizable(True)
         sess_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -3428,6 +3429,13 @@ class TelemetryApp(QMainWindow):
             f'QScrollBar:vertical {{ width: 6px; background: transparent; }}'
             f'QScrollBar::handle:vertical {{ background: #333; border-radius: 3px; }}')
         outer.addWidget(sess_scroll, stretch=1)
+
+        # Empty-state label lives outside the rows layout so the clear loop never deletes it
+        self._sess_empty_lbl = QLabel('No completed laps yet.')
+        self._sess_empty_lbl.setFont(sans(10))
+        self._sess_empty_lbl.setStyleSheet(f'color: {TXT2};')
+        self._sess_empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        outer.addWidget(self._sess_empty_lbl)
 
         return tab
 
@@ -3702,12 +3710,19 @@ class TelemetryApp(QMainWindow):
             or (current_time < 5000 and self.last_lap_time > 5000)
         )
 
+        # Outlap detection: pit lane exit during this lap = outlap
+        cur_in_pit_lane = data.get('is_in_pit_lane', False)
+        if self._prev_is_in_pit_lane and not cur_in_pit_lane:
+            self._current_lap_had_pit_exit = True
+        self._prev_is_in_pit_lane = cur_in_pit_lane
+
         if lap_changed:
             _fuel_now = data.get('fuel', 0.0)
             if self._fuel_at_lap_start is not None and 0 < _fuel_now < self._fuel_at_lap_start:
                 self._fuel_per_lap_history.append(self._fuel_at_lap_start - _fuel_now)
             self._fuel_at_lap_start = _fuel_now
             self._store_completed_lap()
+            self._current_lap_had_pit_exit = False  # reset for new lap
             self._reset_graphs()
             self._reset_analysis_graphs()
             self._reset_current_lap_data()
