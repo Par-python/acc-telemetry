@@ -1575,6 +1575,8 @@ class ChannelGraph(FigureCanvas):
     def __init__(self, color: str, ylabel: str, ylim=(0, 100), parent=None):
         self.fig = Figure(figsize=(8, 2.2), facecolor=BG)
         super().__init__(self.fig)
+        self.setMinimumWidth(100)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.ax = self.fig.add_subplot(111)
         _style_ax(self.ax, self.fig, ylabel=ylabel, ylim=ylim)
         self.setMinimumHeight(160)
@@ -1602,6 +1604,8 @@ class MultiChannelGraph(FigureCanvas):
                  label1: str, label2: str, ylim=(0, 100), parent=None):
         self.fig = Figure(figsize=(8, 2.2), facecolor=BG)
         super().__init__(self.fig)
+        self.setMinimumWidth(100)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.ax = self.fig.add_subplot(111)
         _style_ax(self.ax, self.fig, ylabel=ylabel, ylim=ylim)
         self.setMinimumHeight(160)
@@ -1635,6 +1639,8 @@ class AnalysisTelemetryGraph(FigureCanvas):
     def __init__(self, ylabel: str, color: str = C_SPEED, ylim=(0, 100), parent=None):
         self.fig = Figure(figsize=(4, 1.2), facecolor=BG)
         super().__init__(self.fig)
+        self.setMinimumWidth(100)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.ax = self.fig.add_subplot(111)
         _style_ax(self.ax, self.fig, ylabel=ylabel, ylim=ylim)
         self.distances, self.values = [], []
@@ -1666,6 +1672,8 @@ class AnalysisMultiLineGraph(FigureCanvas):
                  ylim=(0, 100), parent=None):
         self.fig = Figure(figsize=(4, 1.2), facecolor=BG)
         super().__init__(self.fig)
+        self.setMinimumWidth(100)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.ax = self.fig.add_subplot(111)
         _style_ax(self.ax, self.fig, ylabel=ylabel, ylim=ylim)
         self.distances, self.v1, self.v2 = [], [], []
@@ -1701,6 +1709,8 @@ class TimeDeltaGraph(FigureCanvas):
     def __init__(self, parent=None):
         self.fig = Figure(figsize=(10, 1.8), facecolor=BG)
         super().__init__(self.fig)
+        self.setMinimumWidth(100)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.ax = self.fig.add_subplot(111)
         _style_ax(self.ax, self.fig, ylabel='Delta (s)')
         self.ax.axhline(0, color=C_REF, linewidth=1, alpha=0.8)
@@ -1766,6 +1776,8 @@ class ComparisonGraph(FigureCanvas):
                  ylim=(0, 100), parent=None):
         self.fig = Figure(figsize=(8, 1.8), facecolor=BG)
         super().__init__(self.fig)
+        self.setMinimumWidth(100)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.ax = self.fig.add_subplot(111)
         _style_ax(self.ax, self.fig, ylabel=ylabel, ylim=ylim)
         self.setMinimumHeight(140)
@@ -1799,6 +1811,8 @@ class ComparisonDeltaGraph(FigureCanvas):
     def __init__(self, parent=None):
         self.fig = Figure(figsize=(8, 1.8), facecolor=BG)
         super().__init__(self.fig)
+        self.setMinimumWidth(100)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.ax = self.fig.add_subplot(111)
         _style_ax(self.ax, self.fig, ylabel='Delta (s)')
         self.ax.axhline(0, color=TXT2, linewidth=0.8, alpha=0.6)
@@ -2141,6 +2155,7 @@ class LapHistoryPanel(QWidget):
         # Scrollable lap rows
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setStyleSheet('QScrollArea { border: none; background: transparent; }'
                              'QScrollBar:vertical { width: 6px; background: transparent; }'
                              'QScrollBar::handle:vertical { background: #333; border-radius: 3px; }')
@@ -2275,7 +2290,11 @@ class TelemetryApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle('AC / ACC Telemetry')
-        self.setGeometry(100, 100, 1640, 980)
+        _screen = QApplication.primaryScreen().availableGeometry()
+        _w = min(1640, _screen.width() - 40)
+        _h = min(980, _screen.height() - 60)
+        self.setGeometry(_screen.left() + 20, _screen.top() + 30, _w, _h)
+        self.setMinimumSize(900, 600)
 
         self.ac_reader  = None
         self.acc_reader = ACCReader()
@@ -2288,6 +2307,10 @@ class TelemetryApp(QMainWindow):
 
         self.session_laps = []
         self._reset_current_lap_data()
+
+        # Fuel strategy tracking
+        self._fuel_at_lap_start: float | None = None
+        self._fuel_per_lap_history: list[float] = []
 
         # Track selection (None = auto-detect from telemetry data)
         self._active_track_key: str | None = None
@@ -2337,6 +2360,7 @@ class TelemetryApp(QMainWindow):
         self.tabs.addTab(self._build_analysis_tab(), 'LAP ANALYSIS')
         self.tabs.addTab(self._build_tyres_tab(), 'TYRES')
         self.tabs.addTab(self._build_comparison_tab(), 'LAP COMPARISON')
+        self.tabs.addTab(self._build_session_tab(), 'SESSION')
 
         self._set_graph_title_suffix('Lap 1')
 
@@ -2484,6 +2508,8 @@ class TelemetryApp(QMainWindow):
         self.rpm_numbers = QLabel('0 / 8000')
         self.rpm_numbers.setFont(mono(8))
         self.rpm_numbers.setStyleSheet(f'color: {TXT2};')
+        self.rpm_numbers.setMaximumWidth(130)
+        self.rpm_numbers.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 
         self.abs_badge = _AidBadge('ABS')
         self.tc_badge  = _AidBadge('TC')
@@ -2665,7 +2691,45 @@ class TelemetryApp(QMainWindow):
             setattr(self, attr, val)
             return row
 
-        info_vbox.addLayout(_stat(C_RPM,  'FUEL',      '_fuel_lbl',     24, 'L'))
+        # Fuel block — value + strategy sub-labels
+        fuel_block = QVBoxLayout()
+        fuel_block.setSpacing(2)
+        fuel_hdr = QHBoxLayout()
+        fuel_hdr.setSpacing(5)
+        _fd = QLabel('●')
+        _fd.setFont(sans(6))
+        _fd.setStyleSheet(f'color: {C_RPM};')
+        _fl = QLabel('FUEL')
+        _fl.setFont(sans(7))
+        _fl.setStyleSheet(f'color: {TXT2}; letter-spacing: 1px;')
+        fuel_hdr.addWidget(_fd)
+        fuel_hdr.addWidget(_fl)
+        fuel_hdr.addStretch()
+        fuel_val_row = QHBoxLayout()
+        fuel_val_row.setSpacing(5)
+        self._fuel_lbl = QLabel('—')
+        self._fuel_lbl.setFont(mono(24, bold=True))
+        self._fuel_lbl.setStyleSheet(f'color: {WHITE};')
+        self._fuel_lbl.setMaximumWidth(164)
+        self._fuel_lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        fuel_val_row.addWidget(self._fuel_lbl)
+        _fu = QLabel('L')
+        _fu.setFont(sans(9))
+        _fu.setStyleSheet(f'color: {TXT2};')
+        fuel_val_row.addWidget(_fu)
+        fuel_val_row.addStretch()
+        self._fuel_avg_lbl = QLabel('')
+        self._fuel_avg_lbl.setFont(mono(8))
+        self._fuel_avg_lbl.setStyleSheet(f'color: {TXT2};')
+        self._fuel_laps_lbl = QLabel('')
+        self._fuel_laps_lbl.setFont(mono(9, bold=True))
+        self._fuel_laps_lbl.setStyleSheet(f'color: {C_RPM};')
+        fuel_block.addLayout(fuel_hdr)
+        fuel_block.addLayout(fuel_val_row)
+        fuel_block.addWidget(self._fuel_avg_lbl)
+        fuel_block.addWidget(self._fuel_laps_lbl)
+        info_vbox.addLayout(fuel_block)
+
         info_vbox.addLayout(_stat(C_GEAR, 'POSITION',  '_position_lbl', 24))
         info_vbox.addLayout(_stat(C_REF,  'LAST LAP',  '_laptime_lbl',  16))
         info_vbox.addStretch()
@@ -2702,6 +2766,7 @@ class TelemetryApp(QMainWindow):
         # Scroll area for graphs
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setStyleSheet('QScrollArea { border: none; background: transparent; }')
         container = QWidget()
         container.setStyleSheet(f'background: {BG};')
@@ -2794,6 +2859,7 @@ class TelemetryApp(QMainWindow):
 
         right_scroll = QScrollArea()
         right_scroll.setWidgetResizable(True)
+        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         right_scroll.setWidget(right_container)
         right_scroll.setMinimumWidth(300)
         splitter.addWidget(right_scroll)
@@ -2869,6 +2935,7 @@ class TelemetryApp(QMainWindow):
             })
             self.lap_history.refresh(self.session_laps)
             self._populate_comparison_combos()
+            self._refresh_session_tab()
 
             # Promote this lap to the reference for delta / sector comparison
             if dists and times and len(dists) == len(times):
@@ -3164,6 +3231,7 @@ class TelemetryApp(QMainWindow):
 
         graphs_scroll = QScrollArea()
         graphs_scroll.setWidgetResizable(True)
+        graphs_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         graphs_scroll.setWidget(graphs_container)
         graphs_scroll.setStyleSheet(f'background: {BG}; border: none;')
         outer.addWidget(graphs_scroll, stretch=1)
@@ -3249,6 +3317,254 @@ class TelemetryApp(QMainWindow):
         times_a = da.get('time_ms', [])
         times_b = db.get('time_ms', [])
         self._cmp_delta_graph.set_data(dists_a, times_a, dists_b, times_b)
+
+    # ------------------------------------------------------------------
+    # SESSION TAB
+    # ------------------------------------------------------------------
+
+    def _build_session_tab(self) -> QWidget:
+        tab = QWidget()
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(12, 12, 12, 12)
+        outer.setSpacing(10)
+
+        # ── Stats bar ─────────────────────────────────────────────────
+        self._sess_stats_card = QFrame()
+        self._sess_stats_card.setStyleSheet(
+            f'background: {BG2}; border: 1px solid {BORDER}; border-radius: 6px;')
+        stats_row = QHBoxLayout(self._sess_stats_card)
+        stats_row.setContentsMargins(18, 10, 18, 10)
+        stats_row.setSpacing(0)
+
+        def _stat_chip(label_text, value_text, color=TXT):
+            col = QVBoxLayout()
+            col.setSpacing(2)
+            lbl = QLabel(label_text)
+            lbl.setFont(sans(7, bold=True))
+            lbl.setStyleSheet(f'color: {TXT2}; letter-spacing: 1px;')
+            val = QLabel(value_text)
+            val.setFont(mono(11, bold=True))
+            val.setStyleSheet(f'color: {color};')
+            col.addWidget(lbl)
+            col.addWidget(val)
+            return col, val
+
+        sep_v = lambda: (lambda f: (f.setFrameShape(QFrame.Shape.VLine),
+                                    f.setStyleSheet(f'color: {BORDER2};'),
+                                    f.setFixedWidth(1),
+                                    f)[-1])(QFrame())
+
+        c1, self._sess_lbl_count   = _stat_chip('LAPS', '0', TXT)
+        c2, self._sess_lbl_best    = _stat_chip('BEST LAP', '—:——.———', C_PURPLE)
+        c3, self._sess_lbl_avg     = _stat_chip('AVG LAP', '—:——.———', TXT)
+        c4, self._sess_lbl_gap     = _stat_chip('BEST → AVG', '—', TXT2)
+
+        for i, (col, _) in enumerate([(c1, None), (c2, None),
+                                       (c3, None), (c4, None)]):
+            stats_row.addLayout(col)
+            if i < 3:
+                stats_row.addSpacing(28)
+                stats_row.addWidget(sep_v())
+                stats_row.addSpacing(28)
+        stats_row.addStretch()
+
+        # Export button
+        export_btn = QPushButton('⬇  EXPORT CSV')
+        export_btn.setFont(sans(8, bold=True))
+        export_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        export_btn.setStyleSheet(
+            f'background: {BG3}; color: {TXT}; border: 1px solid {BORDER2};'
+            f' border-radius: 4px; padding: 8px 18px; letter-spacing: 1px;')
+        export_btn.clicked.connect(self._export_csv)
+        stats_row.addWidget(export_btn)
+
+        outer.addWidget(self._sess_stats_card)
+
+        # ── Column headers ────────────────────────────────────────────
+        hdr_frame = QFrame()
+        hdr_frame.setStyleSheet(f'background: transparent;')
+        hdr_layout = QHBoxLayout(hdr_frame)
+        hdr_layout.setContentsMargins(10, 4, 10, 4)
+        hdr_layout.setSpacing(0)
+        for txt, stretch, align in [
+            ('#',       0, Qt.AlignmentFlag.AlignCenter),
+            ('LAP TIME', 2, Qt.AlignmentFlag.AlignCenter),
+            ('S1',       1, Qt.AlignmentFlag.AlignCenter),
+            ('S2',       1, Qt.AlignmentFlag.AlignCenter),
+            ('S3',       1, Qt.AlignmentFlag.AlignCenter),
+            ('SAMPLES',  1, Qt.AlignmentFlag.AlignCenter),
+            ('VALID',    0, Qt.AlignmentFlag.AlignCenter),
+        ]:
+            l = QLabel(txt)
+            l.setFont(sans(7, bold=True))
+            l.setStyleSheet(f'color: {TXT2}; letter-spacing: 0.8px;')
+            l.setAlignment(align)
+            l.setMinimumWidth(40)
+            l.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+            hdr_layout.addWidget(l, stretch)
+        outer.addWidget(hdr_frame)
+        outer.addWidget(h_line())
+
+        # ── Scrollable rows ───────────────────────────────────────────
+        self._sess_rows_widget = QWidget()
+        self._sess_rows_widget.setStyleSheet(f'background: transparent;')
+        self._sess_rows_layout = QVBoxLayout(self._sess_rows_widget)
+        self._sess_rows_layout.setContentsMargins(0, 0, 0, 0)
+        self._sess_rows_layout.setSpacing(3)
+        self._sess_rows_layout.addStretch()
+
+        self._sess_empty_lbl = QLabel('No completed laps yet.')
+        self._sess_empty_lbl.setFont(sans(10))
+        self._sess_empty_lbl.setStyleSheet(f'color: {TXT2};')
+        self._sess_empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._sess_rows_layout.insertWidget(0, self._sess_empty_lbl)
+
+        sess_scroll = QScrollArea()
+        sess_scroll.setWidgetResizable(True)
+        sess_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        sess_scroll.setWidget(self._sess_rows_widget)
+        sess_scroll.setStyleSheet(
+            f'QScrollArea {{ border: none; background: transparent; }}'
+            f'QScrollBar:vertical {{ width: 6px; background: transparent; }}'
+            f'QScrollBar::handle:vertical {{ background: #333; border-radius: 3px; }}')
+        outer.addWidget(sess_scroll, stretch=1)
+
+        return tab
+
+    def _refresh_session_tab(self):
+        """Rebuild session summary rows and stats bar from self.session_laps."""
+        laps = self.session_laps
+
+        # Clear existing rows (keep trailing stretch)
+        while self._sess_rows_layout.count() > 1:
+            item = self._sess_rows_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        if not laps:
+            self._sess_empty_lbl.setVisible(True)
+            self._sess_lbl_count.setText('0')
+            for l in (self._sess_lbl_best, self._sess_lbl_avg, self._sess_lbl_gap):
+                l.setText('—')
+            return
+        self._sess_empty_lbl.setVisible(False)
+
+        def _fmt(t_s):
+            m = int(t_s // 60)
+            s = t_s % 60
+            return f'{m}:{s:06.3f}'
+
+        valid_times = [l['total_time_s'] for l in laps if l.get('total_time_s', 0) > 0]
+        best_t = min(valid_times) if valid_times else None
+        avg_t  = (sum(valid_times) / len(valid_times)) if valid_times else None
+
+        best_sectors: list = []
+        for si in range(3):
+            col = [l['sectors'][si] for l in laps
+                   if l.get('sectors') and l['sectors'][si] is not None]
+            best_sectors.append(min(col) if col else None)
+
+        # Stats bar
+        self._sess_lbl_count.setText(str(len(laps)))
+        self._sess_lbl_best.setText(_fmt(best_t) if best_t else '—')
+        self._sess_lbl_avg.setText(_fmt(avg_t) if avg_t else '—')
+        if best_t and avg_t:
+            gap = avg_t - best_t
+            self._sess_lbl_gap.setText(f'+{gap:.3f}s')
+        else:
+            self._sess_lbl_gap.setText('—')
+
+        # Rows (newest first)
+        for lap in reversed(laps):
+            t     = lap.get('total_time_s', 0)
+            secs  = lap.get('sectors', [None, None, None]) or [None, None, None]
+            valid = t > 20 and all(s is not None for s in secs)
+            is_best = best_t is not None and t > 0 and abs(t - best_t) < 0.001
+            samples = len(lap['data'].get('speed', []))
+
+            row = QFrame()
+            if is_best:
+                row.setStyleSheet(
+                    f'background: {C_PURPLE_BG}; border: 1px solid {C_PURPLE};'
+                    f' border-radius: 4px;')
+            else:
+                row.setStyleSheet(
+                    f'background: {BG2}; border: 1px solid {BORDER};'
+                    f' border-radius: 4px;')
+            rl = QHBoxLayout(row)
+            rl.setContentsMargins(10, 6, 10, 6)
+            rl.setSpacing(0)
+
+            def _cell(text, color=TXT, bold=False, stretch=0, align=Qt.AlignmentFlag.AlignCenter):
+                l = QLabel(text)
+                l.setFont(mono(9, bold=bold))
+                l.setStyleSheet(f'color: {color};')
+                l.setAlignment(align)
+                l.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+                rl.addWidget(l, stretch)
+                return l
+
+            lap_color = C_PURPLE if is_best else TXT2
+            _cell(str(lap['lap_number']), color=lap_color, bold=is_best)
+            _cell(_fmt(t), color=C_PURPLE if is_best else TXT, bold=is_best, stretch=2)
+
+            for si, sec_t in enumerate(secs):
+                if sec_t is None:
+                    _cell('—', color=TXT2, stretch=1)
+                else:
+                    is_best_sec = (best_sectors[si] is not None
+                                   and abs(sec_t - best_sectors[si]) < 0.001)
+                    _cell(f'{sec_t:.3f}',
+                          color=C_THROTTLE if is_best_sec else TXT,
+                          bold=is_best_sec, stretch=1)
+
+            _cell(str(samples), color=TXT2, stretch=1)
+            valid_lbl = QLabel('✓' if valid else '✗')
+            valid_lbl.setFont(sans(9, bold=True))
+            valid_lbl.setStyleSheet(
+                f'color: {C_THROTTLE if valid else C_BRAKE};')
+            valid_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            valid_lbl.setMinimumWidth(40)
+            rl.addWidget(valid_lbl)
+
+            self._sess_rows_layout.insertWidget(0, row)
+
+    def _export_csv(self):
+        """Export all session lap data to a CSV file chosen by the user."""
+        if not self.session_laps:
+            QMessageBox.information(self, 'Export CSV',
+                                    'No completed laps to export.')
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, 'Export Session CSV', 'session.csv',
+            'CSV files (*.csv);;All files (*)')
+        if not path:
+            return
+
+        import csv
+        channels = ['lap', 'dist_m', 'time_ms', 'speed', 'throttle',
+                    'brake', 'steer_deg', 'rpm', 'gear', 'abs', 'tc']
+
+        with open(path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(channels)
+            for lap in self.session_laps:
+                d = lap['data']
+                n = len(d.get('dist_m', []))
+                for i in range(n):
+                    def _v(key):
+                        arr = d.get(key, [])
+                        return arr[i] if i < len(arr) else ''
+                    writer.writerow([
+                        lap['lap_number'],
+                        _v('dist_m'), _v('time_ms'), _v('speed'),
+                        _v('throttle'), _v('brake'), _v('steer_deg'),
+                        _v('rpm'), _v('gear'), _v('abs'), _v('tc'),
+                    ])
+
+        QMessageBox.information(self, 'Export CSV',
+                                f'Saved {len(self.session_laps)} laps to:\n{path}')
 
     # ------------------------------------------------------------------
     # GAME SELECTION / AUTO-DETECT
@@ -3387,6 +3703,10 @@ class TelemetryApp(QMainWindow):
         )
 
         if lap_changed:
+            _fuel_now = data.get('fuel', 0.0)
+            if self._fuel_at_lap_start is not None and 0 < _fuel_now < self._fuel_at_lap_start:
+                self._fuel_per_lap_history.append(self._fuel_at_lap_start - _fuel_now)
+            self._fuel_at_lap_start = _fuel_now
             self._store_completed_lap()
             self._reset_graphs()
             self._reset_analysis_graphs()
@@ -3462,6 +3782,23 @@ class TelemetryApp(QMainWindow):
 
         fuel = data['fuel']
         self._fuel_lbl.setText(f"{fuel:.1f}")
+
+        # Seed fuel-at-lap-start on first telemetry tick
+        if self._fuel_at_lap_start is None and fuel > 0:
+            self._fuel_at_lap_start = fuel
+
+        # Fuel strategy sub-labels
+        if self._fuel_per_lap_history:
+            recent = self._fuel_per_lap_history[-5:]  # last 5 laps
+            avg_use = sum(recent) / len(recent)
+            laps_left = (fuel / avg_use) if avg_use > 0 else 0
+            self._fuel_avg_lbl.setText(f'{avg_use:.2f} L/lap')
+            color = C_THROTTLE if laps_left >= 3 else (C_RPM if laps_left >= 1 else C_BRAKE)
+            self._fuel_laps_lbl.setText(f'~{laps_left:.1f} laps')
+            self._fuel_laps_lbl.setStyleSheet(f'color: {color};')
+        elif fuel > 0:
+            self._fuel_avg_lbl.setText('avg after lap 1')
+            self._fuel_laps_lbl.setText('')
 
         self._position_lbl.setText(str(data['position']))
 
@@ -3686,6 +4023,8 @@ class TelemetryApp(QMainWindow):
         self.car_label.setText('—')
         self.track_label.setText('—')
         self._fuel_lbl.setText('—')
+        self._fuel_avg_lbl.setText('')
+        self._fuel_laps_lbl.setText('')
         self._position_lbl.setText('—')
         self._laptime_lbl.setText('—')
         for card in self._tyre_cards:
