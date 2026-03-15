@@ -68,6 +68,14 @@ def sans(size: int, bold: bool = False) -> QFont:
     return f
 
 
+def _safe_list(obj, length: int, default: float = 0.0) -> list:
+    """Return a list of `length` floats from obj, padding/truncating as needed."""
+    try:
+        return [float(obj[i]) for i in range(length)]
+    except Exception:
+        return [default] * length
+
+
 def h_line() -> QFrame:
     line = QFrame()
     line.setFrameShape(QFrame.Shape.HLine)
@@ -340,6 +348,8 @@ class ACUDPReader(TelemetryReader):
                 'tyre_compound': '',
                 'air_temp':  0.0,
                 'road_temp': 0.0,
+                'tyre_wear': [0.0, 0.0, 0.0, 0.0],
+                'brake_bias': 0.0,
             }
         except Exception:
             return None
@@ -424,11 +434,14 @@ class ACCReader(TelemetryReader):
                 'air_temp':  sm.Physics.air_temp,
                 'road_temp': sm.Physics.road_temp,
                 'session_type':    sm.Graphics.session_type.name,
-                'gap_ahead':       sm.Graphics.gap_ahead,
-                'gap_behind':      sm.Graphics.gap_behind,
-                'stint_time_left': sm.Graphics.driver_stint_time_left,
-                'delta_lap_time':  sm.Graphics.delta_lap_time,
-                'estimated_lap':   sm.Graphics.estimated_lap_time,
+                'gap_ahead':       getattr(sm.Graphics, 'gap_ahead', 0) or 0,
+                'gap_behind':      getattr(sm.Graphics, 'gap_behind', 0) or 0,
+                'stint_time_left': getattr(sm.Graphics, 'driver_stint_time_left', 0) or 0,
+                'delta_lap_time':  getattr(sm.Graphics, 'delta_lap_time', 0) or 0,
+                'estimated_lap':   getattr(sm.Graphics, 'estimated_lap_time', 0) or 0,
+                'tyre_wear': _safe_list(
+                    getattr(sm.Physics, 'tyre_wear', None), 4),
+                'brake_bias': float(getattr(sm.Physics, 'brake_bias', 0.0) or 0.0),
             }
         except Exception as e:
             print(f"ACC read error: {e}")
@@ -554,6 +567,13 @@ class IRacingReader(TelemetryReader):
                 'tyre_compound': '',
                 'air_temp':  float(self.ir.get('AirTemp') or 0.0),
                 'road_temp': float(self.ir.get('TrackTemp') or 0.0),
+                'tyre_wear': [
+                    float(self.ir.get('LFwearM') or 0.0) * 100,
+                    float(self.ir.get('RFwearM') or 0.0) * 100,
+                    float(self.ir.get('LRwearM') or 0.0) * 100,
+                    float(self.ir.get('RRwearM') or 0.0) * 100,
+                ],
+                'brake_bias': 0.0,
             }
         except Exception as e:
             print(f"iRacing read error: {e}")
@@ -1071,13 +1091,16 @@ class TyreCard(QWidget):
         self.temp     = 0.0
         self.pressure = 0.0
         self.brake_t  = 0.0
-        self.setMinimumSize(180, 210)
+        self.wear_pct = 0.0
+        self.setMinimumSize(180, 234)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
-    def update_data(self, temp: float, pressure: float, brake_t: float):
+    def update_data(self, temp: float, pressure: float, brake_t: float,
+                    wear_pct: float = 0.0):
         self.temp     = temp
         self.pressure = pressure
         self.brake_t  = brake_t
+        self.wear_pct = wear_pct
         self.update()
 
     def status(self) -> tuple:
@@ -1106,7 +1129,7 @@ class TyreCard(QWidget):
 
         MARGIN  = 14
         HDR_H   = 26
-        FOOT_H  = 60
+        FOOT_H  = 84
         tyre_y  = HDR_H
         tyre_h  = h - HDR_H - FOOT_H
         tyre_rect = QRectF(MARGIN, tyre_y, w - 2 * MARGIN, tyre_h)
@@ -1207,6 +1230,35 @@ class TyreCard(QWidget):
         brk_txt = f'{self.brake_t:.0f}°C' if self.brake_t > 0 else '—'
         painter.drawText(QRectF(MARGIN + 38, lbl_y, bar_w - 38, 14),
                          Qt.AlignmentFlag.AlignVCenter, brk_txt)
+
+        # Wear bar
+        wear_bar_y = foot_y + 55
+        w_pct = max(0.0, min(100.0, self.wear_pct))
+        if w_pct <= 30:
+            wear_col = QColor(C_THROTTLE)
+        elif w_pct <= 60:
+            wear_col = QColor(C_RPM)
+        else:
+            wear_col = QColor(C_BRAKE)
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor(BG3)))
+        painter.drawRoundedRect(QRectF(MARGIN, wear_bar_y, bar_w, 5), 2, 2)
+        if w_pct > 0:
+            painter.setBrush(QBrush(wear_col))
+            painter.drawRoundedRect(
+                QRectF(MARGIN, wear_bar_y, bar_w * w_pct / 100, 5), 2, 2)
+
+        wear_lbl_y = wear_bar_y + 7
+        painter.setFont(sans(6))
+        painter.setPen(QColor(TXT2))
+        painter.drawText(QRectF(MARGIN, wear_lbl_y, 36, 14),
+                         Qt.AlignmentFlag.AlignVCenter, 'WEAR')
+        painter.setFont(mono(7))
+        painter.setPen(wear_col if w_pct > 0 else QColor(TXT2))
+        wear_txt = f'{w_pct:.0f}%' if has_data else '—'
+        painter.drawText(QRectF(MARGIN + 38, wear_lbl_y, bar_w - 38, 14),
+                         Qt.AlignmentFlag.AlignVCenter, wear_txt)
 
         painter.end()
 
@@ -2791,6 +2843,37 @@ class TelemetryApp(QMainWindow):
         fuel_block.addWidget(self._fuel_laps_lbl)
         info_vbox.addLayout(fuel_block)
 
+        # ── Brake bias ────────────────────────────────────────────────
+        _bb_hdr = QHBoxLayout()
+        _bb_hdr.setSpacing(5)
+        _bb_dot = QLabel('●')
+        _bb_dot.setFont(sans(6))
+        _bb_dot.setStyleSheet(f'color: {C_SPEED};')
+        _bb_title = QLabel('BRAKE BIAS')
+        _bb_title.setFont(sans(7))
+        _bb_title.setStyleSheet(f'color: {TXT2}; letter-spacing: 1px;')
+        _bb_hdr.addWidget(_bb_dot)
+        _bb_hdr.addWidget(_bb_title)
+        _bb_hdr.addStretch()
+        self._brake_bias_lbl = QLabel('—')
+        self._brake_bias_lbl.setFont(mono(16, bold=True))
+        self._brake_bias_lbl.setStyleSheet(f'color: {TXT2};')
+
+        # Track frame for split bar
+        self._bias_track = QFrame()
+        self._bias_track.setFixedHeight(6)
+        self._bias_track.setStyleSheet(
+            f'background: {BG3}; border-radius: 3px; border: none;')
+        self._bias_front_fill = QFrame(self._bias_track)
+        self._bias_front_fill.setFixedHeight(6)
+        self._bias_front_fill.setFixedWidth(0)
+        self._bias_front_fill.setStyleSheet(
+            f'background: {C_SPEED}; border-radius: 3px; border: none;')
+
+        info_vbox.addLayout(_bb_hdr)
+        info_vbox.addWidget(self._brake_bias_lbl)
+        info_vbox.addWidget(self._bias_track)
+
         info_vbox.addLayout(_stat(C_GEAR, 'POSITION',  '_position_lbl', 24))
         info_vbox.addLayout(_stat(C_REF,  'LAST LAP',  '_laptime_lbl',  16))
         info_vbox.addStretch()
@@ -4341,12 +4424,13 @@ class TelemetryApp(QMainWindow):
         t_temps  = data.get('tyre_temp',     [0.0, 0.0, 0.0, 0.0])
         t_pres   = data.get('tyre_pressure', [0.0, 0.0, 0.0, 0.0])
         t_brake  = data.get('brake_temp',    [0.0, 0.0, 0.0, 0.0])
+        t_wear   = data.get('tyre_wear',     [0.0, 0.0, 0.0, 0.0])
         air_t    = data.get('air_temp',  0.0)
         road_t   = data.get('road_temp', 0.0)
         compound = data.get('tyre_compound', '')
 
         for i, card in enumerate(self._tyre_cards):
-            card.update_data(t_temps[i], t_pres[i], t_brake[i])
+            card.update_data(t_temps[i], t_pres[i], t_brake[i], t_wear[i])
 
         self._tyre_compound_lbl.setText(compound or '—')
         self._air_temp_lbl.setText(f'{air_t:.1f}°C' if air_t else '—')
@@ -4372,6 +4456,23 @@ class TelemetryApp(QMainWindow):
         elif fuel > 0:
             self._fuel_avg_lbl.setText('avg after lap 1')
             self._fuel_laps_lbl.setText('')
+
+        # ── Brake bias ────────────────────────────────────────────────────
+        raw_bias = data.get('brake_bias', 0.0)
+        if 0.0 < raw_bias <= 1.0:
+            bias_pct = raw_bias * 100
+        elif 50.0 <= raw_bias <= 80.0:
+            bias_pct = raw_bias
+        else:
+            bias_pct = 0.0
+        if bias_pct > 0:
+            col = C_THROTTLE if 54 <= bias_pct <= 64 else C_RPM
+            self._brake_bias_lbl.setText(f'{bias_pct:.1f}% F')
+            self._brake_bias_lbl.setStyleSheet(f'color: {col};')
+            self._bias_front_fill.setFixedWidth(
+                int(self._bias_track.width() * bias_pct / 100))
+            self._bias_front_fill.setStyleSheet(
+                f'background: {col}; border-radius: 3px; border: none;')
 
         self._position_lbl.setText(str(data['position']))
 
@@ -4603,6 +4704,9 @@ class TelemetryApp(QMainWindow):
         self._fuel_lbl.setText('—')
         self._fuel_avg_lbl.setText('')
         self._fuel_laps_lbl.setText('')
+        self._brake_bias_lbl.setText('—')
+        self._brake_bias_lbl.setStyleSheet(f'color: {TXT2};')
+        self._bias_front_fill.setFixedWidth(0)
         self._position_lbl.setText('—')
         self._laptime_lbl.setText('—')
         for card in self._tyre_cards:
