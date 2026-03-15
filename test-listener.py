@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
     QFrame, QGridLayout, QSizePolicy,
 )
 from PyQt6.QtCore import QTimer, Qt, QRectF, QPointF
-from PyQt6.QtGui import QFont, QPainter, QColor, QPen, QBrush, QRadialGradient
+from PyQt6.QtGui import QFont, QPainter, QColor, QPen, QBrush, QRadialGradient, QFontMetrics
 from abc import ABC, abstractmethod
 import threading
 import math
@@ -1885,6 +1885,16 @@ class SectorTimesPanel(QWidget):
             self._sec_gap_labels[s] = gap_lbl
             grid.addWidget(gap_lbl, row, 3)
 
+        # Cap column widths so grid never expands the 230px container
+        for d in (self._sec_ref_labels, self._sec_cur_labels):
+            for lbl in d.values():
+                lbl.setMaximumWidth(52)
+                lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        for lbl in self._sec_gap_labels.values():
+            lbl.setMaximumWidth(64)
+            lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        self.lap_current_label.setMaximumWidth(210)
+
         gaps_frame = QFrame()
         gaps_frame.setStyleSheet(f'background: {BG3}; border: 1px solid {BORDER};'
                                  f' border-radius: 4px;')
@@ -2014,6 +2024,7 @@ class LapHistoryPanel(QWidget):
             l.setFont(sans(7))
             l.setStyleSheet(f'color: {TXT2}; letter-spacing: 0.8px;')
             l.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            l.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
             col_hdr_layout.addWidget(l, stretch)
         outer.addWidget(col_hdr)
 
@@ -2310,12 +2321,17 @@ class TelemetryApp(QMainWindow):
         self.car_label = QLabel('—')
         self.car_label.setFont(mono(10))
         self.car_label.setStyleSheet(f'color: {TXT};')
+        self.car_label.setMaximumWidth(200)
+        self.car_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.track_label = QLabel('—')
         self.track_label.setFont(mono(10))
         self.track_label.setStyleSheet(f'color: {TXT};')
+        self.track_label.setMaximumWidth(240)
+        self.track_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.header_lap_label = QLabel('LAP —')
         self.header_lap_label.setFont(mono(10, bold=True))
         self.header_lap_label.setStyleSheet(f'color: {C_SPEED};')
+        self.header_lap_label.setMaximumWidth(80)
 
         layout.addWidget(self.car_label)
         layout.addWidget(_vsep())
@@ -2432,6 +2448,8 @@ class TelemetryApp(QMainWindow):
         # ── COLUMN B: Hero — Gear + Speed + Steering ──────────────────
         hero_widget = QWidget()
         hero_widget.setStyleSheet('background: transparent;')
+        hero_widget.setMinimumWidth(280)
+        hero_widget.setMaximumWidth(620)
         hero_vbox = QVBoxLayout(hero_widget)
         hero_vbox.setContentsMargins(28, 14, 28, 14)
         hero_vbox.setSpacing(8)
@@ -2458,6 +2476,10 @@ class TelemetryApp(QMainWindow):
             v.setFont(mono(fsize, bold=True))
             v.setStyleSheet(f'color: {num_color};')
             v.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            # Pin to widest possible text so layout never drifts when text changes
+            _fm = QFontMetrics(v.font())
+            _max_txt = '8' if attr == 'gear_value' else '299'
+            v.setFixedWidth(_fm.horizontalAdvance(_max_txt) + 12)
             setattr(self, attr, v)
 
             blk.addWidget(t)
@@ -2518,6 +2540,8 @@ class TelemetryApp(QMainWindow):
             val = QLabel('—')
             val.setFont(mono(fsize, bold=True))
             val.setStyleSheet(f'color: {WHITE};')
+            val.setMaximumWidth(164)
+            val.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
             val_row.addWidget(val)
             if unit:
                 u = QLabel(unit)
@@ -2763,7 +2787,7 @@ class TelemetryApp(QMainWindow):
         info_row.setContentsMargins(16, 8, 16, 8)
         info_row.setSpacing(0)
 
-        def _stat_chip(title, attr):
+        def _stat_chip(title, attr, max_w=130):
             col = QHBoxLayout()
             col.setSpacing(8)
             lbl = QLabel(title)
@@ -2772,6 +2796,8 @@ class TelemetryApp(QMainWindow):
             val = QLabel('—')
             val.setFont(mono(10, bold=True))
             val.setStyleSheet(f'color: {WHITE};')
+            val.setMaximumWidth(max_w)
+            val.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
             setattr(self, attr, val)
             col.addWidget(lbl)
             col.addWidget(val)
@@ -3085,8 +3111,12 @@ class TelemetryApp(QMainWindow):
         self.abs_badge.set_active(data['abs'] > 0, f"{data['abs']:.1f}")
         self.tc_badge.set_active(data['tc'] > 0, f"{data['tc']:.1f}")
 
-        self.car_label.setText(data['car_name'])
-        self.track_label.setText(data['track_name'])
+        self.car_label.setText(
+            QFontMetrics(self.car_label.font()).elidedText(
+                data['car_name'], Qt.TextElideMode.ElideRight, 196))
+        self.track_label.setText(
+            QFontMetrics(self.track_label.font()).elidedText(
+                data['track_name'], Qt.TextElideMode.ElideRight, 236))
         self._auto_detect_track(data['track_name'])
 
         # ── Tyres tab ─────────────────────────────────────────────────────
