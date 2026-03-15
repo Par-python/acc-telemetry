@@ -1,0 +1,4 @@
+PyQt6>=6.4.0
+matplotlib>=3.7.0
+pyaccsharedmemory>=3.0.0
+irsdk>=1.4.0

@@ -677,17 +677,31 @@ class TrackRecorder:
             'turns': [],
         }
 
-        out_dir = Path(__file__).parent / 'tracks'
-        out_dir.mkdir(exist_ok=True)
+        out_dir = _get_tracks_dir()
+        out_dir.mkdir(parents=True, exist_ok=True)
         path = out_dir / f'{track_key}.json'
         with open(path, 'w') as f:
             json.dump(data, f, indent=2)
         return str(path)
 
 
+def _get_tracks_dir() -> Path:
+    """Return the writable tracks directory.
+
+    When frozen as a PyInstaller EXE, write next to the .exe so the user's
+    recorded tracks persist between sessions.  When running from source, use
+    the repo's tracks/ folder as before.
+    """
+    if getattr(sys, 'frozen', False):
+        base = Path(sys.executable).parent
+    else:
+        base = Path(__file__).parent
+    return base / 'tracks'
+
+
 def _load_saved_tracks():
     """Load any JSON files from the tracks/ directory into TRACKS and TRACK_NAME_MAP."""
-    tracks_dir = Path(__file__).parent / 'tracks'
+    tracks_dir = _get_tracks_dir()
     if not tracks_dir.exists():
         return
     for json_file in sorted(tracks_dir.glob('*.json')):
