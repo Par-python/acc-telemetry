@@ -1759,6 +1759,113 @@ class TimeDeltaGraph(FigureCanvas):
         self.draw_idle()
 
 
+class ComparisonGraph(FigureCanvas):
+    """Overlaid two-lap distance-based graph: Lap A solid, Lap B dashed."""
+
+    def __init__(self, ylabel: str, color_a: str, color_b: str,
+                 ylim=(0, 100), parent=None):
+        self.fig = Figure(figsize=(8, 1.8), facecolor=BG)
+        super().__init__(self.fig)
+        self.ax = self.fig.add_subplot(111)
+        _style_ax(self.ax, self.fig, ylabel=ylabel, ylim=ylim)
+        self.setMinimumHeight(140)
+        self.line_a, = self.ax.plot([], [], color=color_a, linewidth=1.4,
+                                    linestyle='-', alpha=0.9)
+        self.line_b, = self.ax.plot([], [], color=color_b, linewidth=1.4,
+                                    linestyle='--', alpha=0.75)
+
+    def set_data(self, dists_a: list, vals_a: list,
+                 dists_b: list, vals_b: list):
+        max_d = max((dists_a[-1] if dists_a else 0),
+                    (dists_b[-1] if dists_b else 0),
+                    MONZA_LENGTH_M)
+        if dists_a and vals_a:
+            self.line_a.set_data(dists_a, vals_a)
+        if dists_b and vals_b:
+            self.line_b.set_data(dists_b, vals_b)
+        self.ax.set_xlim(0, max_d)
+        self.draw_idle()
+
+    def clear(self):
+        self.line_a.set_data([], [])
+        self.line_b.set_data([], [])
+        self.ax.set_xlim(0, MONZA_LENGTH_M)
+        self.draw_idle()
+
+
+class ComparisonDeltaGraph(FigureCanvas):
+    """Time delta between two saved laps: (Lap A time) − (Lap B time) vs distance."""
+
+    def __init__(self, parent=None):
+        self.fig = Figure(figsize=(8, 1.8), facecolor=BG)
+        super().__init__(self.fig)
+        self.ax = self.fig.add_subplot(111)
+        _style_ax(self.ax, self.fig, ylabel='Delta (s)')
+        self.ax.axhline(0, color=TXT2, linewidth=0.8, alpha=0.6)
+        self.setMinimumHeight(140)
+        self.line, = self.ax.plot([], [], color=C_DELTA, linewidth=1.4)
+        self._fill_pos = None
+        self._fill_neg = None
+
+    def set_data(self, dists_a: list, times_a: list,
+                 dists_b: list, times_b: list):
+        if self._fill_pos:
+            self._fill_pos.remove()
+            self._fill_pos = None
+        if self._fill_neg:
+            self._fill_neg.remove()
+            self._fill_neg = None
+
+        if not dists_a or not dists_b:
+            self.line.set_data([], [])
+            self.draw_idle()
+            return
+
+        step = max(dists_a[-1], dists_b[-1]) / 500
+        sample_dists = [i * step for i in range(501)]
+        deltas = []
+        for d in sample_dists:
+            ta = _interp_time_at_dist(dists_a, times_a, d)
+            tb = _interp_time_at_dist(dists_b, times_b, d)
+            if ta is not None and tb is not None:
+                deltas.append((ta - tb) / 1000.0)
+            else:
+                deltas.append(None)
+
+        valid = [(d, v) for d, v in zip(sample_dists, deltas) if v is not None]
+        if not valid:
+            self.draw_idle()
+            return
+        xd, yd = zip(*valid)
+        self.line.set_data(xd, yd)
+        self.ax.set_xlim(0, max(xd))
+        mn = min(min(yd) - 0.05, -0.2)
+        mx = max(max(yd) + 0.05,  0.2)
+        self.ax.set_ylim(mn, mx)
+        try:
+            import numpy as np  # type: ignore[import-untyped]
+            xa, ya = np.array(xd), np.array(yd)
+            self._fill_pos = self.ax.fill_between(
+                xa, 0, ya, where=(ya > 0), color=C_REF, alpha=0.15)
+            self._fill_neg = self.ax.fill_between(
+                xa, 0, ya, where=(ya <= 0), color=C_DELTA, alpha=0.15)
+        except ImportError:
+            pass
+        self.draw_idle()
+
+    def clear(self):
+        if self._fill_pos:
+            self._fill_pos.remove()
+            self._fill_pos = None
+        if self._fill_neg:
+            self._fill_neg.remove()
+            self._fill_neg = None
+        self.line.set_data([], [])
+        self.ax.set_xlim(0, MONZA_LENGTH_M)
+        self.ax.set_ylim(-0.2, 0.2)
+        self.draw_idle()
+
+
 # ---------------------------------------------------------------------------
 # LAP DELTA HELPERS
 # ---------------------------------------------------------------------------
@@ -2229,6 +2336,7 @@ class TelemetryApp(QMainWindow):
         self.tabs.addTab(self._build_graphs_tab(), 'TELEMETRY GRAPHS')
         self.tabs.addTab(self._build_analysis_tab(), 'LAP ANALYSIS')
         self.tabs.addTab(self._build_tyres_tab(), 'TYRES')
+        self.tabs.addTab(self._build_comparison_tab(), 'LAP COMPARISON')
 
         self._set_graph_title_suffix('Lap 1')
 
@@ -2760,6 +2868,7 @@ class TelemetryApp(QMainWindow):
                 'data': {k: list(v) for k, v in self.current_lap_data.items()},
             })
             self.lap_history.refresh(self.session_laps)
+            self._populate_comparison_combos()
 
             # Promote this lap to the reference for delta / sector comparison
             if dists and times and len(dists) == len(times):
@@ -2927,6 +3036,219 @@ class TelemetryApp(QMainWindow):
         color = C_BRAKE if warn else C_THROTTLE
         self._insights_lbl.setText(text)
         self._insights_lbl.setStyleSheet(f'color: {color};')
+
+    # ------------------------------------------------------------------
+    # LAP COMPARISON TAB
+    # ------------------------------------------------------------------
+
+    def _build_comparison_tab(self) -> QWidget:
+        tab = QWidget()
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(10, 10, 10, 10)
+        outer.setSpacing(8)
+
+        # ── Selector bar ──────────────────────────────────────────────
+        sel_card = QFrame()
+        sel_card.setStyleSheet(
+            f'background: {BG2}; border: 1px solid {BORDER}; border-radius: 6px;')
+        sel_row = QHBoxLayout(sel_card)
+        sel_row.setContentsMargins(14, 10, 14, 10)
+        sel_row.setSpacing(12)
+
+        def _lbl(text, color=TXT2):
+            l = QLabel(text)
+            l.setFont(sans(8, bold=True))
+            l.setStyleSheet(f'color: {color}; letter-spacing: 1px;')
+            return l
+
+        sel_row.addWidget(_lbl('LAP A'))
+        self._cmp_combo_a = QComboBox()
+        self._cmp_combo_a.setStyleSheet(
+            f'background: {BG3}; color: {TXT}; border: 1px solid {BORDER2};'
+            f' border-radius: 4px; padding: 4px 8px;')
+        self._cmp_combo_a.setMinimumWidth(180)
+        sel_row.addWidget(self._cmp_combo_a)
+
+        self._cmp_time_a = QLabel('—')
+        self._cmp_time_a.setFont(mono(9))
+        self._cmp_time_a.setStyleSheet(f'color: {C_SPEED};')
+        sel_row.addWidget(self._cmp_time_a)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.VLine)
+        sep.setStyleSheet(f'color: {BORDER2};')
+        sel_row.addWidget(sep)
+
+        sel_row.addWidget(_lbl('LAP B'))
+        self._cmp_combo_b = QComboBox()
+        self._cmp_combo_b.setStyleSheet(
+            f'background: {BG3}; color: {TXT}; border: 1px solid {BORDER2};'
+            f' border-radius: 4px; padding: 4px 8px;')
+        self._cmp_combo_b.setMinimumWidth(180)
+        sel_row.addWidget(self._cmp_combo_b)
+
+        self._cmp_time_b = QLabel('—')
+        self._cmp_time_b.setFont(mono(9))
+        self._cmp_time_b.setStyleSheet(f'color: {C_STEER};')
+        sel_row.addWidget(self._cmp_time_b)
+
+        sel_row.addStretch()
+
+        self._cmp_delta_lbl = QLabel('')
+        self._cmp_delta_lbl.setFont(mono(9, bold=True))
+        self._cmp_delta_lbl.setStyleSheet(f'color: {TXT2};')
+        sel_row.addWidget(self._cmp_delta_lbl)
+
+        cmp_btn = QPushButton('COMPARE')
+        cmp_btn.setFont(sans(8, bold=True))
+        cmp_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        cmp_btn.setStyleSheet(
+            f'background: {BG3}; color: {TXT}; border: 1px solid {BORDER2};'
+            f' border-radius: 4px; padding: 6px 18px;'
+            f' letter-spacing: 1px;')
+        cmp_btn.clicked.connect(self._refresh_comparison)
+        sel_row.addWidget(cmp_btn)
+
+        outer.addWidget(sel_card)
+
+        # ── Legend ────────────────────────────────────────────────────
+        legend_row = QHBoxLayout()
+        legend_row.setSpacing(16)
+        for label, color, style in [('Lap A', C_SPEED, '─────'),
+                                     ('Lap B', C_STEER, '- - -')]:
+            dot = QLabel(f'{style}  {label}')
+            dot.setFont(mono(8))
+            dot.setStyleSheet(f'color: {color};')
+            legend_row.addWidget(dot)
+        legend_row.addStretch()
+        outer.addLayout(legend_row)
+
+        # ── Scrollable graphs ─────────────────────────────────────────
+        graphs_container = QWidget()
+        graphs_container.setStyleSheet(f'background: {BG};')
+        graphs_vbox = QVBoxLayout(graphs_container)
+        graphs_vbox.setContentsMargins(4, 4, 4, 8)
+        graphs_vbox.setSpacing(4)
+
+        COLOR_A = C_SPEED
+        COLOR_B = C_STEER
+
+        self._cmp_speed = ComparisonGraph(
+            'Speed km/h', COLOR_A, COLOR_B, ylim=(0, 320))
+        self._cmp_thr_brk_a = ComparisonGraph(
+            'Throttle %', COLOR_A, COLOR_B, ylim=(0, 100))
+        self._cmp_brk = ComparisonGraph(
+            'Brake %', C_BRAKE, '#ff99aa', ylim=(0, 100))
+        self._cmp_gear = ComparisonGraph(
+            'Gear', COLOR_A, COLOR_B, ylim=(-1, 8))
+        self._cmp_rpm = ComparisonGraph(
+            'RPM', C_RPM, '#ffdd88', ylim=(0, 10000))
+        self._cmp_steer = ComparisonGraph(
+            'Steer °', COLOR_A, COLOR_B, ylim=(-540, 540))
+
+        for title, color, graph in [
+            ('SPEED', C_SPEED, self._cmp_speed),
+            ('THROTTLE', C_THROTTLE, self._cmp_thr_brk_a),
+            ('BRAKE', C_BRAKE, self._cmp_brk),
+            ('GEAR', C_GEAR, self._cmp_gear),
+            ('RPM', C_RPM, self._cmp_rpm),
+            ('STEERING', C_STEER, self._cmp_steer),
+        ]:
+            graphs_vbox.addWidget(_channel_header(color, title))
+            graphs_vbox.addWidget(graph)
+
+        # Delta graph
+        graphs_vbox.addWidget(_channel_header(C_DELTA, 'TIME DELTA', 's'))
+        self._cmp_delta_graph = ComparisonDeltaGraph()
+        graphs_vbox.addWidget(self._cmp_delta_graph)
+
+        graphs_scroll = QScrollArea()
+        graphs_scroll.setWidgetResizable(True)
+        graphs_scroll.setWidget(graphs_container)
+        graphs_scroll.setStyleSheet(f'background: {BG}; border: none;')
+        outer.addWidget(graphs_scroll, stretch=1)
+
+        return tab
+
+    def _populate_comparison_combos(self):
+        """Rebuild both QComboBoxes from self.session_laps (called after each lap stored)."""
+        def _fmt(lap):
+            t = lap.get('total_time_s', 0)
+            m = int(t // 60)
+            s = t % 60
+            return f"Lap {lap['lap_number']}  {m}:{s:06.3f}"
+
+        cur_a = self._cmp_combo_a.currentIndex()
+        cur_b = self._cmp_combo_b.currentIndex()
+
+        self._cmp_combo_a.blockSignals(True)
+        self._cmp_combo_b.blockSignals(True)
+        self._cmp_combo_a.clear()
+        self._cmp_combo_b.clear()
+
+        for lap in self.session_laps:
+            self._cmp_combo_a.addItem(_fmt(lap))
+            self._cmp_combo_b.addItem(_fmt(lap))
+
+        # Default: most recent lap vs second most recent
+        n = len(self.session_laps)
+        self._cmp_combo_a.setCurrentIndex(max(0, n - 2))
+        self._cmp_combo_b.setCurrentIndex(n - 1)
+        if cur_a >= 0 and cur_a < n:
+            self._cmp_combo_a.setCurrentIndex(cur_a)
+        if cur_b >= 0 and cur_b < n:
+            self._cmp_combo_b.setCurrentIndex(cur_b)
+
+        self._cmp_combo_a.blockSignals(False)
+        self._cmp_combo_b.blockSignals(False)
+
+    def _refresh_comparison(self):
+        """Plot both selected laps on the comparison graphs."""
+        idx_a = self._cmp_combo_a.currentIndex()
+        idx_b = self._cmp_combo_b.currentIndex()
+
+        if idx_a < 0 or idx_b < 0 or idx_a >= len(self.session_laps) \
+                or idx_b >= len(self.session_laps):
+            return
+
+        lap_a = self.session_laps[idx_a]
+        lap_b = self.session_laps[idx_b]
+
+        def _fmt_time(t_s):
+            m = int(t_s // 60)
+            s = t_s % 60
+            return f'{m}:{s:06.3f}'
+
+        self._cmp_time_a.setText(_fmt_time(lap_a.get('total_time_s', 0)))
+        self._cmp_time_b.setText(_fmt_time(lap_b.get('total_time_s', 0)))
+
+        dt = lap_a.get('total_time_s', 0) - lap_b.get('total_time_s', 0)
+        sign = '+' if dt > 0 else ''
+        self._cmp_delta_lbl.setText(f'Δ {sign}{dt:.3f}s')
+        self._cmp_delta_lbl.setStyleSheet(
+            f'color: {C_BRAKE if dt > 0 else C_THROTTLE};')
+
+        da = lap_a['data']
+        db = lap_b['data']
+        dists_a = da.get('dist_m', [])
+        dists_b = db.get('dist_m', [])
+
+        self._cmp_speed.set_data(dists_a, da.get('speed', []),
+                                 dists_b, db.get('speed', []))
+        self._cmp_thr_brk_a.set_data(dists_a, da.get('throttle', []),
+                                      dists_b, db.get('throttle', []))
+        self._cmp_brk.set_data(dists_a, da.get('brake', []),
+                               dists_b, db.get('brake', []))
+        self._cmp_gear.set_data(dists_a, da.get('gear', []),
+                                dists_b, db.get('gear', []))
+        self._cmp_rpm.set_data(dists_a, da.get('rpm', []),
+                               dists_b, db.get('rpm', []))
+        self._cmp_steer.set_data(dists_a, da.get('steer_deg', []),
+                                 dists_b, db.get('steer_deg', []))
+
+        times_a = da.get('time_ms', [])
+        times_b = db.get('time_ms', [])
+        self._cmp_delta_graph.set_data(dists_a, times_a, dists_b, times_b)
 
     # ------------------------------------------------------------------
     # GAME SELECTION / AUTO-DETECT
