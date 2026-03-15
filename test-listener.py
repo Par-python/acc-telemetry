@@ -3732,6 +3732,52 @@ class TelemetryApp(QMainWindow):
         timing_grid.addWidget(self._race_stint_time_card)
 
         outer.addWidget(timing_card)
+
+        # ── Pit Strategy card ─────────────────────────────────────────
+        pit_card = _card()
+        pit_vbox = QVBoxLayout(pit_card)
+        pit_vbox.setContentsMargins(18, 12, 18, 12)
+        pit_vbox.setSpacing(8)
+
+        pit_hdr_row = QHBoxLayout()
+        pit_hdr_row.addWidget(_chip_lbl('PIT STRATEGY'))
+        pit_hdr_row.addStretch()
+        self._pit_no_data_lbl = _chip_lbl('Complete a lap to calculate',
+                                           color=TXT2, bold=False)
+        pit_hdr_row.addWidget(self._pit_no_data_lbl)
+        pit_vbox.addLayout(pit_hdr_row)
+
+        pit_stats_row = QHBoxLayout()
+        pit_stats_row.setSpacing(0)
+
+        def _pit_stat(title, attr):
+            col = QVBoxLayout()
+            col.setSpacing(2)
+            col.addWidget(_chip_lbl(title, font_size=7))
+            v = QLabel('—')
+            v.setFont(mono(11, bold=True))
+            v.setStyleSheet(f'color: {TXT};')
+            col.addWidget(v)
+            setattr(self, attr, v)
+            return col
+
+        pit_stats_row.addLayout(_pit_stat('FUEL LAPS LEFT', '_pit_fuel_laps_lbl'))
+        pit_stats_row.addSpacing(28)
+        pit_stats_row.addLayout(_pit_stat('TYRE STINT', '_pit_tyre_stint_lbl'))
+        pit_stats_row.addSpacing(28)
+        pit_stats_row.addLayout(_pit_stat('TYRE CONDITION', '_pit_tyre_cond_lbl'))
+        pit_stats_row.addStretch()
+        pit_vbox.addLayout(pit_stats_row)
+
+        pit_vbox.addWidget(h_line())
+
+        self._pit_rec_lbl = QLabel('—')
+        self._pit_rec_lbl.setFont(sans(11, bold=True))
+        self._pit_rec_lbl.setStyleSheet(f'color: {TXT2}; letter-spacing: 1px;')
+        self._pit_rec_lbl.setWordWrap(True)
+        pit_vbox.addWidget(self._pit_rec_lbl)
+
+        outer.addWidget(pit_card)
         outer.addStretch()
 
         return tab
@@ -3810,6 +3856,59 @@ class TelemetryApp(QMainWindow):
             self._race_stint_time_card.setVisible(True)
         else:
             self._race_stint_time_card.setVisible(False)
+
+        # ── Pit strategy ─────────────────────────────────────────────
+        history = self._fuel_per_lap_history
+        if not history:
+            self._pit_no_data_lbl.setVisible(True)
+            self._pit_rec_lbl.setText('—')
+            self._pit_rec_lbl.setStyleSheet(f'color: {TXT2}; letter-spacing: 1px;')
+        else:
+            self._pit_no_data_lbl.setVisible(False)
+            avg_fuel = sum(history[-5:]) / len(history[-5:])
+            fuel_laps = data.get('fuel', 0) / avg_fuel if avg_fuel > 0 else 0
+
+            stint = self._tyre_stint_laps
+            avg_temp = sum(data.get('tyre_temp', [80, 80, 80, 80])) / 4
+
+            # Tyre condition heuristic (GT3 dry-tyre baseline)
+            if stint < 6:
+                tyre_cond, tyre_color = 'FRESH', C_THROTTLE
+            elif stint < 14:
+                tyre_cond, tyre_color = 'GOOD', C_THROTTLE
+            elif stint < 20:
+                tyre_cond, tyre_color = 'WORN', C_RPM
+            else:
+                tyre_cond, tyre_color = 'CRITICAL', C_BRAKE
+            if avg_temp > 110:
+                tyre_cond, tyre_color = 'CRITICAL', C_BRAKE
+            elif avg_temp > 100 and tyre_cond == 'GOOD':
+                tyre_cond, tyre_color = 'WORN', C_RPM
+
+            fuel_laps_safe = max(0, fuel_laps - 1.0)
+            tyre_laps_left = max(0, 20 - stint)
+            pit_in = min(int(fuel_laps_safe), tyre_laps_left)
+
+            fuel_color = (C_THROTTLE if fuel_laps > 5
+                          else C_RPM if fuel_laps > 2 else C_BRAKE)
+            self._pit_fuel_laps_lbl.setText(f'{fuel_laps:.1f}')
+            self._pit_fuel_laps_lbl.setStyleSheet(f'color: {fuel_color};')
+            self._pit_tyre_stint_lbl.setText(f'{stint} laps')
+            self._pit_tyre_cond_lbl.setText(tyre_cond)
+            self._pit_tyre_cond_lbl.setStyleSheet(f'color: {tyre_color};')
+
+            if tyre_cond == 'CRITICAL' or fuel_laps < 1.5:
+                rec, rec_color = 'PIT THIS LAP', C_BRAKE
+            elif pit_in <= 2:
+                rec = f'PIT IN {pit_in} LAP{"S" if pit_in != 1 else ""}'
+                rec_color = C_RPM
+            elif pit_in <= 5:
+                rec, rec_color = f'PREPARE TO PIT  ·  ~{pit_in} laps', C_RPM
+            else:
+                rec, rec_color = f'STAY OUT  ·  ~{pit_in} laps to window', C_THROTTLE
+            self._pit_rec_lbl.setText(rec)
+            self._pit_rec_lbl.setStyleSheet(
+                f'color: {rec_color}; letter-spacing: 1px;')
 
     # ------------------------------------------------------------------
     # GAME SELECTION / AUTO-DETECT
@@ -4303,6 +4402,12 @@ class TelemetryApp(QMainWindow):
             dot.setStyleSheet(f'color: {BORDER2};')
         for lbl in self._race_tyre_temps:
             lbl.setText('—°')
+        self._pit_rec_lbl.setText('—')
+        self._pit_rec_lbl.setStyleSheet(f'color: {TXT2}; letter-spacing: 1px;')
+        self._pit_fuel_laps_lbl.setText('—')
+        self._pit_tyre_stint_lbl.setText('—')
+        self._pit_tyre_cond_lbl.setText('—')
+        self._pit_no_data_lbl.setVisible(True)
         self._reset_analysis_graphs()
         self.track_map.reset()
 
